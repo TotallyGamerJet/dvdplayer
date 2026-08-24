@@ -1,6 +1,6 @@
 module dvdplayer.app/dvdplayer
 
-go 1.25.0
+go 1.27.0
 
 require (
 	codeberg.org/totallygamerjet/media v0.3.0
