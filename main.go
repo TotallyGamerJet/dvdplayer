@@ -27,12 +27,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 )
 
-// mpgURL is a URL of an example MPEG-1 video. The license is the following:
-//
-// https://commons.wikimedia.org/wiki/File:Shibuya_Crossing,_Tokyo,_Japan_(video).webm
-// "Shibuya Crossing, Tokyo, Japan (video).webm" by Basile Morin
-// The Creative Commons Attribution-Share Alike 4.0 International license
-const mpgURL = "https://example-resources.ebitengine.org/shibuya.mpg"
+// mpgURL is a URL of an example MPEG-1 video.
+const mpgURL = "https://samples.ffmpeg.org/archive/video/mpeg1video/mpeg+mpeg1video+mp2++MPEG-PS_sample_not_playable_with_mplayer_G2.mpeg"
 
 type Game struct {
 	player *mpegPlayer
