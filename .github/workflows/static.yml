@@ -36,7 +36,7 @@ jobs:
         with:
           go-version: '1.27'
       - name: Build WASM
-        run: env GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o docs/dvdplayer.wasm .
+        run: env GOOS=js GOARCH=wasm GOEXPERIMENT=simd go build -trimpath -ldflags="-s -w" -o docs/dvdplayer.wasm .
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

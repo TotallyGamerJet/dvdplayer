@@ -1,234 +1,232 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DVD Player</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📀</text></svg>">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        html, body {
-            width: 100%;
-            height: 100%;
-            background-color: #000;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-family: 'Courier New', monospace;
-            overflow: hidden;
-        }
-        .container {
-            text-align: center;
-            padding: 3rem;
-            border: 2px solid #00ff00;
-            border-radius: 10px;
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DVD Player</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📀</text></svg>">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+        width: 100%;
+        height: 100%;
+        background-color: #000;
+        font-family: 'Courier New', monospace;
+        overflow: hidden;
+    }
+
+    /* Scanlines belong to the front of the machine, not to the film: they lie
+       over the chrome, which is opaque and would otherwise hide them, and are
+       taken away entirely once a disc is playing so the picture is the
+       picture. */
+    .scanline {
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        pointer-events: none;
+        background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.1) 0px,
+                rgba(0, 0, 0, 0.1) 1px,
+                transparent 1px,
+                transparent 2px
+        );
+    }
+
+    /* Ebitengine puts its canvas straight in the body as soon as the program
+       runs — 0x0 until a disc is playing — and writes its own inline styles
+       onto the body, so the chrome floats over the top rather than sharing a
+       layout with it. */
+    #chrome {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        background: #000;
+    }
+    body.playing #chrome,
+    body.playing .scanline { display: none; }
+
+    .container {
+        text-align: center;
+        padding: 3rem;
+        max-width: 40rem;
+        border: 2px solid #00ff00;
+        border-radius: 10px;
+        background: rgba(0, 20, 0, 0.5);
+        animation: pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% {
             box-shadow:
                     0 0 20px rgba(0, 255, 0, 0.3),
                     0 0 40px rgba(0, 255, 0, 0.2),
                     0 0 60px rgba(0, 255, 0, 0.1),
                     inset 0 0 20px rgba(0, 255, 0, 0.05);
-            background: rgba(0, 20, 0, 0.5);
-            animation: pulse 3s ease-in-out infinite;
         }
-        @keyframes pulse {
-            0%, 100% {
-                box-shadow:
-                        0 0 20px rgba(0, 255, 0, 0.3),
-                        0 0 40px rgba(0, 255, 0, 0.2),
-                        0 0 60px rgba(0, 255, 0, 0.1),
-                        inset 0 0 20px rgba(0, 255, 0, 0.05);
-            }
-            50% {
-                box-shadow:
-                        0 0 30px rgba(0, 255, 0, 0.5),
-                        0 0 60px rgba(0, 255, 0, 0.3),
-                        0 0 90px rgba(0, 255, 0, 0.2),
-                        inset 0 0 30px rgba(0, 255, 0, 0.1);
-            }
+        50% {
+            box-shadow:
+                    0 0 30px rgba(0, 255, 0, 0.5),
+                    0 0 60px rgba(0, 255, 0, 0.3),
+                    0 0 90px rgba(0, 255, 0, 0.2),
+                    inset 0 0 30px rgba(0, 255, 0, 0.1);
         }
-        .icon {
-            font-size: 4rem;
-            margin-bottom: 1.5rem;
-            color: #00ff00;
-            text-shadow: 0 0 20px #00ff00;
-        }
-        h1 {
-            color: #00ff00;
-            font-size: 2rem;
-            text-transform: uppercase;
-            letter-spacing: 4px;
-            margin-bottom: 1rem;
-            text-shadow: 0 0 10px #00ff00;
-        }
-        .status {
-            color: #00cc00;
-            font-size: 0.9rem;
-            letter-spacing: 2px;
-            opacity: 0.8;
-        }
-        .blinking {
-            animation: blink 1.5s step-end infinite;
-        }
-        @keyframes blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0; }
-        }
-        .launch-btn {
-            margin-top: 1.5rem;
-            padding: 0.8rem 2rem;
-            background: transparent;
-            border: 2px solid #00ff00;
-            border-radius: 5px;
-            color: #00ff00;
-            font-family: 'Courier New', monospace;
-            font-size: 1rem;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-shadow: 0 0 5px #00ff00;
-            box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
-        }
-        .launch-btn:hover {
-            background: rgba(0, 255, 0, 0.1);
-            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
-            text-shadow: 0 0 10px #00ff00;
-        }
-        .launch-btn:active {
-            transform: scale(0.98);
-        }
-        .scanline {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            background: repeating-linear-gradient(
-                    0deg,
-                    rgba(0, 0, 0, 0.1) 0px,
-                    rgba(0, 0, 0, 0.1) 1px,
-                    transparent 1px,
-                    transparent 2px
-            );
-        }
-.open-disc-btn {
-    position: fixed;
-    bottom: 20px;
-    left: 20px;
-    padding: 0.6rem 1.2rem;
-    background: transparent;
-    border: 2px solid #00ff00;
-    border-radius: 5px;
-    color: #00ff00;
-    font-family: 'Courier New', monospace;
-    font-size: 0.85rem;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    text-shadow: 0 0 5px #00ff00;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
-    z-index: 100;
-}
-.open-disc-btn:hover {
-    background: rgba(0, 255, 0, 0.1);
-    box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
-    text-shadow: 0 0 10px #00ff00;
-}
-.open-disc-btn:active {
-    transform: scale(0.98);
-}
-#disc-input {
-    display: none;
-}
+    }
+
+    .icon {
+        font-size: 4rem;
+        margin-bottom: 1.5rem;
+        color: #00ff00;
+        text-shadow: 0 0 20px #00ff00;
+    }
+
+    h1 {
+        color: #00ff00;
+        font-size: 2rem;
+        text-transform: uppercase;
+        letter-spacing: 4px;
+        margin-bottom: 1rem;
+        text-shadow: 0 0 10px #00ff00;
+    }
+
+    .status {
+        color: #00cc00;
+        font-size: 0.9rem;
+        letter-spacing: 2px;
+        opacity: 0.8;
+        line-height: 1.6;
+    }
+    /* The state and whatever the system has to say sit together, the way a
+       console prints. The hint is the one line meant for a person, so it comes
+       after the button it is about. */
+    #error { margin-top: 0.5rem; }
+    #hint { margin-top: 1.5rem; }
+
+    .blinking { animation: blink 1.5s step-end infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    #pick {
+        margin-top: 1.5rem;
+        padding: 0.8rem 2rem;
+        background: transparent;
+        border: 2px solid #00ff00;
+        border-radius: 5px;
+        color: #00ff00;
+        font-family: 'Courier New', monospace;
+        font-size: 1rem;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-shadow: 0 0 5px #00ff00;
+        box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
+    }
+    #pick:hover:not(:disabled) {
+        background: rgba(0, 255, 0, 0.1);
+        box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+        text-shadow: 0 0 10px #00ff00;
+    }
+    #pick:active:not(:disabled) { transform: scale(0.98); }
+    #pick:disabled { opacity: 0.4; cursor: default; }
+
+    /* Amber rather than red: still of the same screen. */
+    #error code {
+        color: #00ff00;
+        background: rgba(0, 255, 0, 0.08);
+        padding: 0.1em 0.4em;
+        border-radius: 3px;
+    }
+
+    #error {
+        min-height: 1.6em;
+        color: #ffb000;
+        font-size: 0.85rem;
+        letter-spacing: 1px;
+        text-shadow: 0 0 10px rgba(255, 176, 0, 0.6);
+    }
+
+    canvas { outline: none; }
 </style>
-</head>
-<body>
+
 <div class="scanline"></div>
-<button class="open-disc-btn" onclick="openDiscPicker()">📀 Open Disc/ISO</button>
-<input type="file" id="disc-input" accept=".iso,.img,.bin,.cue" onchange="handleDiscSelected(event)">
-<div class="container">
-    <div class="icon">💿</div>
-    <h1>DVD Player</h1>
-    <p class="status">// SYSTEM INITIALIZING <span class="blinking">_</span></p>
-    <p class="status" style="margin-top: 0.5rem;">Coming Soon</p>
-    <button class="launch-btn" onclick="launchPlayer()">Launch Player</button>
+
+<div id="chrome">
+    <div class="container">
+        <div class="icon">💿</div>
+        <h1>DVD Player</h1>
+        <p class="status" id="state">// SYSTEM INITIALIZING <span class="blinking">_</span></p>
+        <p class="status" id="error"></p>
+        <button id="pick" disabled>Starting…</button>
+        <p class="status" id="hint">
+            Choose the folder holding the disc's VIDEO_TS directory. The disc is
+            read and descrambled in the browser; nothing is uploaded.
+        </p>
+    </div>
 </div>
+
+<script src="wasm_exec.js"></script>
 <script>
-    function launchPlayer() {
-        document.body.innerHTML = '<iframe src="player.html" allow="autoplay" width="640" height="480" style="border: none;"></iframe>';
-        document.body.style.display = 'flex';
-        document.body.style.justifyContent = 'center';
-        document.body.style.alignItems = 'center';
-    }
+    const button = document.getElementById("pick");
+    const error = document.getElementById("error");
+    const status = document.getElementById("state");
 
-    async function openDiscPicker() {
-        try {
-            // Try directory picker first (works for disc drives)
-            if ('showDirectoryPicker' in window) {
-                const dirHandle = await window.showDirectoryPicker({
-                    mode: 'read'
-                });
-                console.log('Selected directory:', dirHandle.name);
-                await processDiscDirectory(dirHandle);
-            } else {
-                // Fallback to file picker for browsers without directory picker support
-                document.getElementById('disc-input').click();
-            }
-        } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.error('Error selecting disc:', err);
-                alert('Error: ' + err.message);
-            }
+    // dvdplay calls these as it goes: it is the only side that can tell when
+    // the button is live, or a disc that opened from a folder that held none.
+    // The picker itself is opened by Go from inside the press, which is what
+    // keeps the gesture the browser insists on.
+    window.dvdplayReady = () => {
+        button.disabled = false;
+        button.textContent = "Open Disc";
+        status.innerHTML = '// READY <span class="blinking">_</span>';
+    };
+    window.dvdplayStarted = (name) => {
+        document.body.classList.add("playing");
+        document.title = name ? name + " — DVD Player" : "DVD Player";
+    };
+    window.dvdplayFailed = (message) => {
+        showError(message);
+        button.textContent = "Choose Another Folder";
+    };
+
+    // Set the message as text, then mark up anything the viewer is meant to
+    // type. Building the HTML from the message itself would put whatever the
+    // error happens to say straight into the page.
+    function showError(message) {
+        error.textContent = "// " + message;
+        for (const cmd of ["dvdplay -unlock"]) {
+            const at = error.textContent.indexOf(cmd);
+            if (at < 0) continue;
+            const tail = error.firstChild.splitText(at);
+            tail.splitText(cmd.length);
+            const code = document.createElement("code");
+            code.textContent = cmd;
+            tail.replaceWith(code);
         }
     }
+    // Playback stopped after it had started: bring the chrome back rather than
+    // leave the viewer looking at a black screen.
+    window.dvdplayFatal = (message) => {
+        document.body.classList.remove("playing");
+        status.innerHTML = "// PLAYBACK STOPPED";
+        showError(message);
+        button.disabled = true;
+        button.textContent = "Reload To Try Again";
+    };
 
-    async function processDiscDirectory(dirHandle) {
-        // Look for VIDEO_TS folder (DVD-Video structure)
-        try {
-            const videoTsHandle = await dirHandle.getDirectoryHandle('VIDEO_TS', { create: false });
-            console.log('Found VIDEO_TS folder - this is a DVD-Video disc!');
-            
-            // Launch player and wait for WASM to be ready
-            launchPlayer();
-            
-            // Wait for WASM to initialize
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            // Hash the disc using the Go WASM function
-            const iframe = document.querySelector('iframe');
-            const wasmWindow = iframe.contentWindow;
-            
-            try {
-                if (wasmWindow.hashMediaDisc) {
-                    // Pass the directory handle, not a string path
-                    const hash = await wasmWindow.hashMediaDisc(dirHandle);
-                    console.log('Disc hash:', hash);
-                    alert('Disc hash: ' + hash);
-                } else {
-                    console.error('hashMediaDisc not available - WASM may not be loaded yet');
-                }
-            } catch (err) {
-                console.error('Error hashing disc:', err);
-            }
-        } catch {
-            // No VIDEO_TS, might be a data disc or ISO contents
-            alert('Selected: ' + dirHandle.name + '\n(No VIDEO_TS folder found - not a standard DVD-Video disc)');
-        }
+    if (!window.showDirectoryPicker) {
+        error.textContent =
+            "// NO DIRECTORY PICKER: reading a disc needs the File System Access " +
+            "API, which today means a Chromium browser — Chrome, Edge or Opera.";
     }
 
-    function handleDiscSelected(event) {
-        const file = event.target.files[0];
-        if (file) {
-            console.log('Selected disc/ISO:', file.name);
-            alert('Selected: ' + file.name + '\nSize: ' + (file.size / 1024 / 1024).toFixed(2) + ' MB');
-        }
-    }
+    const go = new Go();
+    WebAssembly.instantiateStreaming(fetch("dvdplay.wasm"), go.importObject)
+        .then((result) => go.run(result.instance))
+        .catch((err) => {
+            button.textContent = "Could Not Start";
+            error.textContent = "// " + String(err);
+        });
 </script>
-</body>
-</html>
