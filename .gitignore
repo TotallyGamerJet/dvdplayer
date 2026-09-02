@@ -2,3 +2,4 @@
 docs/*.wasm
 docs/discdb/
 .cache/
+.DS_Store
