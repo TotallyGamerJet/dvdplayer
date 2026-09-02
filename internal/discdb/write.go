@@ -1,0 +1,385 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Media Authors
+
+package discdb
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+)
+
+// writer holds where the tree is going and what it was built from.
+type writer struct {
+	opts   Options
+	commit string
+}
+
+// path locates a file in the generated tree.
+func (w *writer) path(elem ...string) string {
+	return filepath.Join(append([]string{w.opts.Out}, elem...)...)
+}
+
+// upstream is a permanent URL for a file in the data repository, pinned
+// to the commit this tree was built from. Artwork is linked rather than
+// copied: it is two gigabytes and it never changes.
+func (w *writer) upstream(p string) string {
+	owner, repo, ok := githubRepo(w.opts.Repo)
+	if !ok {
+		return ""
+	}
+	segs := strings.Split(path.Join("data", p), "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" +
+		w.commit + "/" + strings.Join(segs, "/")
+}
+
+// githubRepo pulls the owner and repository out of a GitHub clone URL.
+func githubRepo(repoURL string) (owner, repo string, ok bool) {
+	u, err := url.Parse(repoURL)
+	if err != nil || !strings.HasSuffix(u.Hostname(), "github.com") {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// titles writes the documents shared by every disc of a film or series.
+// They live under titles/<slug>/ rather than beside each disc because a
+// tmdb.json runs to fifty kilobytes and a popular title has a dozen
+// discs; info.json links to them.
+func (w *writer) titles(repo *git.Repository, ds *dataset) error {
+	for _, t := range ds.titles {
+		dir := w.path("titles", t.meta.Slug)
+		if err := w.doc(filepath.Join(dir, "metadata.json"), t.raw); err != nil {
+			return err
+		}
+		for name, blob := range map[string]plumbing.Hash{"tmdb.json": t.tmdb, "imdb.json": t.imdb} {
+			if blob.IsZero() {
+				continue
+			}
+			data, err := readBlob(repo, blob)
+			if err != nil {
+				return fmt.Errorf("discdb: %s/%s: %w", t.dir, name, err)
+			}
+			if err := w.doc(filepath.Join(dir, name), compact(data)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// hashes writes the flat list of every hash in the tree, so a reader can
+// hold the whole keyspace and know a lookup will miss without asking.
+func (w *writer) hashes(index map[string]*group) error {
+	all := make([]string, 0, len(index))
+	for h := range index {
+		all = append(all, h)
+	}
+	sort.Strings(all)
+	var buf bytes.Buffer
+	for _, h := range all {
+		buf.WriteString(h)
+		buf.WriteByte('\n')
+	}
+	return writeFile(w.path("hashes.txt"), buf.Bytes())
+}
+
+// infos writes {HASH}/info.json for every hash, and reports where each
+// disc document has to be copied to.
+//
+// A match's number is its place in info.json's matches, and the disc
+// document sits at {HASH}/<n>/disc.json. The releases under one hash
+// nearly always describe the same disc, though: an anthology can list
+// one disc under forty films. Rather than write forty copies of it, the
+// first match to want a disc document keeps it and the rest link to
+// that one, which is why a reader follows links.disc instead of
+// building the path itself.
+func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, error) {
+	dests := map[plumbing.Hash][]string{}
+	for hash, g := range index {
+		doc := info{
+			Schema:  schemaVersion,
+			Hash:    hash,
+			Types:   g.kinds(),
+			Count:   len(g.entries),
+			Matches: make([]match, 0, len(g.entries)),
+		}
+		held := map[plumbing.Hash]string{}
+		for i, e := range g.entries {
+			discPath, ok := held[e.disc.blob]
+			if !ok {
+				discPath = path.Join(discsDir, hash, strconv.Itoa(i), "disc.json")
+				held[e.disc.blob] = discPath
+				dests[e.disc.blob] = append(dests[e.disc.blob], w.path(discPath))
+			}
+
+			t := e.rel.title
+			doc.Matches = append(doc.Matches, match{
+				Index:      i,
+				Collection: e.rel.dir,
+				Kind:       t.kind,
+				Ref:        e.ref,
+				Disc:       summarize(e.disc),
+				Title:      t.raw,
+				Release:    e.rel.raw,
+				Links: links{
+					Disc:   discPath,
+					Title:  path.Join("titles", t.meta.Slug, "metadata.json"),
+					Tmdb:   w.titleLink(t, t.tmdb, "tmdb.json"),
+					Imdb:   w.titleLink(t, t.imdb, "imdb.json"),
+					Cover:  w.artwork(t.cover, t.dir, "cover.jpg"),
+					Front:  w.artwork(e.rel.front, e.rel.dir, "front.jpg"),
+					Back:   w.artwork(e.rel.back, e.rel.dir, "back.jpg"),
+					Source: w.upstream(path.Join(e.disc.release.dir, e.disc.name+".json")),
+				},
+			})
+		}
+		if err := w.json(w.path(discsDir, hash, "info.json"), doc); err != nil {
+			return nil, err
+		}
+	}
+	return dests, nil
+}
+
+func (w *writer) titleLink(t *title, blob plumbing.Hash, name string) string {
+	if blob.IsZero() {
+		return ""
+	}
+	return path.Join("titles", t.meta.Slug, name)
+}
+
+func (w *writer) artwork(present bool, dir, name string) string {
+	if !present {
+		return ""
+	}
+	return w.upstream(path.Join(dir, name))
+}
+
+// discs copies each disc document to every place the index put it. The
+// blobs are read one at a time, because go-git's object store is not
+// safe to read from several goroutines, and squeezed and written on all
+// the cores there are.
+func (w *writer) discs(repo *git.Repository, dests map[plumbing.Hash][]string) error {
+	type job struct {
+		data  []byte
+		paths []string
+	}
+	jobs := make(chan job, 2*runtime.NumCPU())
+
+	var (
+		mu       sync.Mutex
+		writeErr error
+		wg       sync.WaitGroup
+	)
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				data := []byte(compact(j.data))
+				if w.opts.Pretty {
+					data = j.data
+				}
+				for _, p := range j.paths {
+					if err := writeFile(p, data); err != nil {
+						mu.Lock()
+						if writeErr == nil {
+							writeErr = err
+						}
+						mu.Unlock()
+						break
+					}
+				}
+			}
+		}()
+	}
+
+	var readErr error
+	written, last := 0, time.Now()
+	for blob, paths := range dests {
+		data, err := readBlob(repo, blob)
+		if err != nil {
+			readErr = fmt.Errorf("discdb: reading disc %s: %w", blob, err)
+			break
+		}
+		jobs <- job{data, paths}
+		if written += len(paths); time.Since(last) > 2*time.Second {
+			fmt.Printf("discdb: %d disc documents written\n", written)
+			last = time.Now()
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	if readErr != nil {
+		return readErr
+	}
+	return writeErr
+}
+
+// newManifest builds index.json, which says what the tree was built from
+// and where a reader finds everything in it.
+func newManifest(w *writer, commit *object.Commit, ds *dataset, index map[string]*group) manifest {
+	m := manifest{
+		Schema:    schemaVersion,
+		Generated: timestamp(time.Now()),
+		Source: manifestSource{
+			Repo:   w.opts.Repo,
+			Branch: w.opts.Branch,
+			Commit: w.commit,
+			Date:   timestamp(commit.Committer.When),
+		},
+		Layout: manifestLayout{
+			Info:   "discs/{hash}/info.json",
+			Disc:   "discs/{hash}/{match}/disc.json",
+			Title:  "titles/{slug}/metadata.json",
+			Hashes: "hashes.txt",
+			Note: "A hash is upper case hex: the 32 digit MD5 content hash, " +
+				"or the 40 digit MakeMKV global disc id. Every path in this " +
+				"tree is relative to the directory index.json sits in.",
+		},
+	}
+	for _, g := range index {
+		m.Counts.Matches += len(g.entries)
+		if g.content {
+			m.Counts.ContentHashes++
+		}
+		if g.global {
+			m.Counts.GlobalDiscIds++
+		}
+	}
+	m.Counts.Hashes = len(index)
+	m.Counts.Discs = len(ds.discs)
+	m.Counts.Releases = len(ds.releases)
+	m.Counts.Titles = len(ds.titles)
+	return m
+}
+
+// readme leaves a short account of the layout in the tree itself, so
+// that someone who lands on the published site is not left guessing.
+// Backticks are written as @ and swapped in at the end, which is what it
+// costs to keep the text below readable as a raw string.
+func (w *writer) readme(m manifest) error {
+	const text = `# discdb
+
+A disc lookup built from [TheDiscDb](%[1]s) at commit
+[%[2]s](%[1]s/tree/%[3]s), dated %[4]s. Generated by
+@go tool mage discdb:build@; do not edit it by hand.
+
+Every path below is relative to this directory.
+
+	index.json                    what the tree was built from, and how much of each thing it holds
+	hashes.txt                    every hash in the tree, one to a line, sorted
+	discs/<HASH>/info.json        the disc that hashes to HASH
+	discs/<HASH>/<n>/disc.json    that disc as TheDiscDb describes it
+	titles/<slug>/                metadata.json, tmdb.json and imdb.json for one film or series
+
+A hash is upper case hex. Each disc is filed under both of the hashes
+TheDiscDb knows it by:
+
+  - its content hash, the MD5 over the sizes of the files in VIDEO_TS or
+    BDMV/STREAM, which a player can work out for itself from the disc in
+    its drive;
+  - its global disc id, as MakeMKV reports it.
+
+Both are 32 hex digits on a DVD, so the length of a hash does not say
+which kind it is. The @types@ field of info.json does.
+
+## Looking up a disc
+
+Fetch @discs/<HASH>/info.json@. A 404 means TheDiscDb does not have the
+disc.
+
+The file lists every release that holds the disc, ordered by collection,
+and carries the film or series metadata and the release metadata inline,
+so that one fetch is usually the whole answer. The bulky documents are
+linked instead: @links.disc@ for the full title, track and chapter
+listing, @links.tmdb@ and @links.imdb@ for the external metadata, and
+@links.cover@, @links.front@ and @links.back@ for the artwork, which
+stays upstream.
+
+Follow the paths under @links@ rather than building them. A disc that
+forty films list is stored once, and all forty matches link to that copy.
+
+## Rebuilding
+
+	go tool mage discdb:build
+
+DISCDB_REPO, DISCDB_BRANCH, DISCDB_CACHE, DISCDB_OUT and DISCDB_PRETTY
+override the defaults. The tree is rebuilt from nothing every time.
+`
+	out := fmt.Sprintf(text, m.Source.Repo, m.Source.Commit[:8], m.Source.Commit, m.Source.Date[:10])
+	return writeFile(w.path("README.md"), []byte(strings.ReplaceAll(out, "@", "`")))
+}
+
+// json writes a document this generator built.
+func (w *writer) json(p string, v any) error {
+	var (
+		data []byte
+		err  error
+	)
+	if w.opts.Pretty {
+		data, err = json.MarshalIndent(v, "", "  ")
+	} else {
+		data, err = json.Marshal(v)
+	}
+	if err != nil {
+		return err
+	}
+	return writeFile(p, data)
+}
+
+// doc writes a document copied from upstream, squeezed unless the build
+// asked for the tree to stay readable.
+func (w *writer) doc(p string, raw json.RawMessage) error {
+	if !w.opts.Pretty {
+		return writeFile(p, raw)
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return writeFile(p, raw)
+	}
+	return writeFile(p, buf.Bytes())
+}
+
+func writeFile(p string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
+}
+
+func readBlob(repo *git.Repository, hash plumbing.Hash) ([]byte, error) {
+	blob, err := repo.BlobObject(hash)
+	if err != nil {
+		return nil, err
+	}
+	r, err := blob.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}

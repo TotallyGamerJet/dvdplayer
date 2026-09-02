@@ -1,2 +1,4 @@
 .idea/
-docs/dvdplayer.wasm
+docs/*.wasm
+docs/discdb/
+.cache/
