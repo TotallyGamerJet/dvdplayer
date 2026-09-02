@@ -63,7 +63,7 @@ type matchView struct {
 	Release    srcRelease
 	Disc       discSummary
 	Segments   []segment
-	Unnamed    int
+	Unlabelled int
 	// RepeatOf is the match above that already listed this disc's
 	// titles, counted from 1, or 0 when this match lists them itself.
 	// An anthology can file one disc under forty films, and forty
@@ -88,17 +88,26 @@ type segment struct {
 	Feature     bool
 }
 
-// segments picks out the titles worth listing and counts the rest. Four
-// titles in five are unnamed upstream, and a row saying nothing but a
-// running time is not worth the ink.
+// segments picks out the titles worth listing and counts the rest.
+//
+// A title earns a row by being labelled upstream: it needs both a kind
+// and a name. Four titles in five have neither, and a row that says
+// only how long something is helps nobody. Nor does the filename
+// MakeMKV wrote, which is why the name here is TheDiscDb's and not the
+// one info.json falls back to for a feature that has to be called
+// something. Everything left out is in disc.json.
 func segments(d *disc, featureIndex int) ([]segment, int) {
 	var out []segment
-	unnamed := 0
+	unlabelled := 0
 	for i := range d.meta.Titles {
 		t := &d.meta.Titles[i]
-		name, kind := itemTitle(t), t.Item.Type
-		if name == "" && kind == "" {
-			unnamed++
+		kind := t.Item.Type
+		name := strings.TrimSpace(t.Item.Title)
+		if name == "" {
+			name = itemTitle(t) // a kind with no name of its own
+		}
+		if kind == "" || name == "" {
+			unlabelled++
 			continue
 		}
 		seg := segment{
@@ -115,7 +124,7 @@ func segments(d *disc, featureIndex int) ([]segment, int) {
 		}
 		out = append(out, seg)
 	}
-	return out, unnamed
+	return out, unlabelled
 }
 
 // spaced breaks TheDiscDb's run-together kinds apart, so that a
@@ -326,9 +335,9 @@ chapter numbers. The <a href="README.md">README</a> has the details.</p>
 {{end}}</tbody>
 </table>
 </div>
-<p class="muted">{{len .Segments}} of {{.Disc.Titles}} titles are named or classified{{if .Unnamed}}; the other {{.Unnamed}} are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>{{end}}.</p>
+<p class="muted">{{len .Segments}} of {{.Disc.Titles}} titles are labelled{{if .Unlabelled}}; the other {{.Unlabelled}} are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>{{end}}.</p>
 {{else}}
-<p class="muted">TheDiscDb names none of this disc&rsquo;s {{.Disc.Titles}} titles; they are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>.</p>
+<p class="muted">TheDiscDb labels none of this disc&rsquo;s {{.Disc.Titles}} titles; they are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>.</p>
 {{end}}
 <p><a href="{{$.Base}}{{.Links.Disc}}">disc.json</a> ·
 <a href="{{$.Base}}titles/{{.Title.Slug}}/index.html">{{.Title.Title}}</a> ·

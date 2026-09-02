@@ -165,15 +165,15 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []d
 				featureIndex = summary.Feature.Index
 			}
 			var (
-				segs     []segment
-				unnamed  int
-				repeatOf int
+				segs       []segment
+				unlabelled int
+				repeatOf   int
 			)
 			if first, ok := listed[e.disc.blob]; ok {
 				repeatOf = first + 1
 			} else {
 				listed[e.disc.blob] = i
-				segs, unnamed = segments(e.disc, featureIndex)
+				segs, unlabelled = segments(e.disc, featureIndex)
 			}
 			views = append(views, matchView{
 				Index:      i,
@@ -184,7 +184,7 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []d
 				Release:    e.rel.meta,
 				Disc:       summary,
 				Segments:   segs,
-				Unnamed:    unnamed,
+				Unlabelled: unlabelled,
 				RepeatOf:   repeatOf,
 				Links:      lnks,
 			})
