@@ -62,7 +62,73 @@ type matchView struct {
 	Title      srcMeta
 	Release    srcRelease
 	Disc       discSummary
-	Links      links
+	Segments   []segment
+	Unnamed    int
+	// RepeatOf is the match above that already listed this disc's
+	// titles, counted from 1, or 0 when this match lists them itself.
+	// An anthology can file one disc under forty films, and forty
+	// copies of the same table is no use to anybody.
+	RepeatOf int
+	Links    links
+}
+
+// segment is a title on the disc that TheDiscDb put a name or a kind
+// to: an episode, a deleted scene, a featurette. The page lists them
+// because a disc is more than its feature, and someone looking at it
+// wants to know what else is on there. They are not in info.json; that
+// is what disc.json is for.
+type segment struct {
+	Index       int
+	TitleNumber int
+	SourceFile  string
+	Title       string
+	Type        string
+	Duration    string
+	Chapters    int
+	Feature     bool
+}
+
+// segments picks out the titles worth listing and counts the rest. Four
+// titles in five are unnamed upstream, and a row saying nothing but a
+// running time is not worth the ink.
+func segments(d *disc, featureIndex int) ([]segment, int) {
+	var out []segment
+	unnamed := 0
+	for i := range d.meta.Titles {
+		t := &d.meta.Titles[i]
+		name, kind := itemTitle(t), t.Item.Type
+		if name == "" && kind == "" {
+			unnamed++
+			continue
+		}
+		seg := segment{
+			Index:      t.Index,
+			SourceFile: t.SourceFile,
+			Title:      name,
+			Type:       kind,
+			Duration:   t.Duration,
+			Chapters:   len(t.Item.Chapters),
+			Feature:    t.Index == featureIndex,
+		}
+		if n, ok := dvdTitleNumber(d.meta.Format, t.SourceFile); ok {
+			seg.TitleNumber = n
+		}
+		out = append(out, seg)
+	}
+	return out, unnamed
+}
+
+// spaced breaks TheDiscDb's run-together kinds apart, so that a
+// DeletedScene reads as a deleted scene.
+func spaced(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			b.WriteByte(' ')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // titlesView is titles/index.html, every film and series.
@@ -133,6 +199,7 @@ func short(hash string) string {
 var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
 	"commas": commas,
 	"short":  short,
+	"spaced": spaced,
 }).Parse(`
 {{define "top"}}<!doctype html>
 <html lang="en">
@@ -247,6 +314,22 @@ chapter numbers. The <a href="README.md">README</a> has the details.</p>
 {{if .Disc.ContentHash}}<tr><th>content hash<td class="mono break">{{.Disc.ContentHash}}{{end}}
 {{if .Disc.GlobalDiscId}}<tr><th>global disc id<td class="mono break">{{.Disc.GlobalDiscId}}{{end}}
 </table>
+
+{{if .RepeatOf}}
+<p class="muted">The same disc as {{.RepeatOf}} above; its titles are listed there.</p>
+{{else if .Segments}}
+<div class="scroll">
+<table>
+<thead><tr><th>{{if .Disc.Feature.TitleNumber}}Title{{else}}Source{{end}}<th>Kind<th>Name<th>Duration<th class="num">Chapters</thead>
+<tbody>
+{{range .Segments}}<tr{{if .Feature}} class="feature"{{end}}><td class="num mono nowrap">{{if .TitleNumber}}{{.TitleNumber}}{{else}}{{.SourceFile}}{{end}}<td class="muted nowrap">{{if .Type}}{{spaced .Type}}{{else}}—{{end}}<td>{{if .Title}}{{.Title}}{{else}}<span class="muted">unnamed</span>{{end}}<td class="muted nowrap">{{.Duration}}<td class="num muted">{{if .Chapters}}{{.Chapters}}{{end}}
+{{end}}</tbody>
+</table>
+</div>
+<p class="muted">{{len .Segments}} of {{.Disc.Titles}} titles are named or classified{{if .Unnamed}}; the other {{.Unnamed}} are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>{{end}}.</p>
+{{else}}
+<p class="muted">TheDiscDb names none of this disc&rsquo;s {{.Disc.Titles}} titles; they are in <a href="{{$.Base}}{{.Links.Disc}}">disc.json</a>.</p>
+{{end}}
 <p><a href="{{$.Base}}{{.Links.Disc}}">disc.json</a> ·
 <a href="{{$.Base}}titles/{{.Title.Slug}}/index.html">{{.Title.Title}}</a> ·
 <a href="{{$.Base}}{{.Links.Title}}">metadata.json</a>
@@ -329,6 +412,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .scroll { overflow-x: auto; margin: .5rem -1.25rem; padding: 0 1.25rem }
 .scroll table { min-width: 54rem }
 .rows td { white-space: nowrap; max-width: 26rem; overflow: hidden; text-overflow: ellipsis }
+tr.feature td { font-weight: 600 }
 table { border-collapse: collapse; width: 100%; margin: .5rem 0; font-size: .9rem }
 th, td { text-align: left; vertical-align: top; padding: .3rem .6rem;
   border-bottom: 1px solid Canvas; box-shadow: inset 0 -1px 0 GrayText }

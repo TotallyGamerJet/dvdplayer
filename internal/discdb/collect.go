@@ -320,10 +320,10 @@ func compact(data []byte) json.RawMessage {
 	return json.RawMessage(buf.Bytes())
 }
 
-// summarize describes a disc closely enough that a player can put a
-// name on screen without fetching anything else. It picks out the
-// feature, the title the disc marks as the film or failing that the
-// longest, and for a DVD indexes every title on the disc.
+// summarize describes a disc closely enough to name it and its feature
+// without fetching disc.json: the title the disc marks as the film, or
+// failing that the longest. Naming any other title on the disc means
+// reading disc.json, which is where they all are.
 func summarize(d *disc) discSummary {
 	s := discSummary{
 		File:         d.name,
@@ -338,25 +338,8 @@ func summarize(d *disc) discSummary {
 
 	var best *srcTitle
 	for i := range d.meta.Titles {
-		t := &d.meta.Titles[i]
-		if best == nil || betterFeature(t, best) {
+		if t := &d.meta.Titles[i]; best == nil || betterFeature(t, best) {
 			best = t
-		}
-		// The title list is what makes a DVD title number a thing a
-		// reader is told rather than has to work out. A Blu-ray is left
-		// out of it: hundreds of titles a disc, for a mapping that is
-		// not a title number anyway.
-		if n, ok := dvdTitleNumber(d.meta.Format, t.SourceFile); ok {
-			s.TitleList = append(s.TitleList, titleEntry{
-				Index:       t.Index,
-				TitleNumber: n,
-				SourceFile:  t.SourceFile,
-				Title:       itemTitle(t),
-				Type:        t.Item.Type,
-				Duration:    t.Duration,
-				Seconds:     durationSeconds(t.Duration),
-				Chapters:    len(t.Item.Chapters),
-			})
 		}
 	}
 

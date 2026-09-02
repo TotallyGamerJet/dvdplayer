@@ -129,6 +129,7 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []d
 			Matches: make([]match, 0, len(g.entries)),
 		}
 		held := map[plumbing.Hash]string{}
+		listed := map[plumbing.Hash]int{}
 		for i, e := range g.entries {
 			discPath, ok := held[e.disc.blob]
 			if !ok {
@@ -159,6 +160,21 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []d
 				Release:    e.rel.raw,
 				Links:      lnks,
 			})
+			featureIndex := -1
+			if summary.Feature != nil {
+				featureIndex = summary.Feature.Index
+			}
+			var (
+				segs     []segment
+				unnamed  int
+				repeatOf int
+			)
+			if first, ok := listed[e.disc.blob]; ok {
+				repeatOf = first + 1
+			} else {
+				listed[e.disc.blob] = i
+				segs, unnamed = segments(e.disc, featureIndex)
+			}
 			views = append(views, matchView{
 				Index:      i,
 				Collection: e.rel.dir,
@@ -167,6 +183,9 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []d
 				Title:      t.meta,
 				Release:    e.rel.meta,
 				Disc:       summary,
+				Segments:   segs,
+				Unnamed:    unnamed,
+				RepeatOf:   repeatOf,
 				Links:      lnks,
 			})
 		}
@@ -489,23 +508,28 @@ forty films list is stored once, and all forty matches link to that copy.
 
 ## Finding the title that is playing
 
-A player knows the DVD title number its navigator is on, 1 to 99. On a
-DVD, @matches[].disc.titleList@ maps that number onto a name:
+A player knows the DVD title number its navigator is on, 1 to 99. That
+number is a title's @SourceFile@ in disc.json, so naming the title means
+fetching @links.disc@ and looking it up:
 
-	for _, t := range match.Disc.TitleList {
-		if t.TitleNumber == playing {
-			// t.Title, t.Type, t.Duration
+	for _, t := range disc.Titles {
+		if n, err := strconv.Atoi(t.SourceFile); err == nil && n == playing {
+			// t.Item.Title, t.Item.Type, t.Duration
 		}
 	}
 
-@titleList@ is written for DVDs only, and each entry lines up with the
-entry at the same @index@ in disc.json. @disc.feature@ carries the same
-fields for the main title, plus @titleNumber@.
+info.json describes only the feature, and @disc.feature.titleNumber@ is
+that title's number already parsed, so a player that only ever captions
+the main film need not fetch anything else. Anything beyond it, an
+episode or a deleted scene or a featurette, is a second fetch. That is
+deliberate. The whole title list was tried in info.json and dropped: on
+a Blu-ray it cost thirty megabytes across the tree and quintupled a busy
+document, and on a DVD, where it was affordable, it only duplicated a
+disc.json that is 5.6 KB in the median and already the place the titles
+live. One fetch per disc inserted is not worth two copies of the truth.
 
-On a Blu-ray @titleList@ is absent: those discs run to hundreds of
-titles, and carrying them would cost thirty megabytes across the tree
-and quintuple the size of a busy info.json, for a mapping that is not a
-title number anyway. Fetch @links.disc@ and read @Titles@ there.
+The browsable page for a disc does list them, so you can see what is on
+a disc without reading JSON.
 
 ### What SourceFile holds
 
