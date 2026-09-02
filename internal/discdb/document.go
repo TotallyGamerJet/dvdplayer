@@ -11,7 +11,7 @@ import (
 // schemaVersion rises whenever the layout of the generated tree changes
 // in a way a reader must know about. It is the schema field of every
 // document below.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // discsDir is the directory the hashes live under, one level down from
 // the root so that index.json, hashes.txt and titles are not lost among
@@ -96,20 +96,46 @@ type discSummary struct {
 	GlobalDiscId string   `json:"globalDiscId,omitempty"`
 	Titles       int      `json:"titles"`
 	Feature      *feature `json:"feature,omitempty"`
+	// TitleList indexes every title on the disc, and is written for
+	// DVDs only: it is what lets a player name the segment it is
+	// playing without fetching disc.json. On a Blu-ray it is left out,
+	// because those discs run to hundreds of titles and the saving does
+	// not pay for the size. Absent means fetch disc.json.
+	TitleList []titleEntry `json:"titleList,omitempty"`
+}
+
+// titleEntry is one title of a disc, enough of it to put a name and a
+// running time on screen. It is the same title disc.json describes at
+// the same Index.
+type titleEntry struct {
+	Index int `json:"index"`
+	// TitleNumber is the DVD title number, 1 to 99, that a player asks
+	// its navigator for. It is written whenever the disc is a DVD and
+	// SourceFile names a title number, which upstream it always does.
+	TitleNumber int    `json:"titleNumber,omitempty"`
+	SourceFile  string `json:"sourceFile,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Duration    string `json:"duration,omitempty"`
+	Seconds     int    `json:"seconds,omitempty"`
+	Chapters    int    `json:"chapters"`
 }
 
 // feature is the disc's main title: the one marked MainMovie, or else
 // the longest, which is what a player wants to start with.
 type feature struct {
-	Index      int    `json:"index"`
-	Title      string `json:"title,omitempty"`
-	Type       string `json:"type,omitempty"`
-	SourceFile string `json:"sourceFile,omitempty"`
-	SegmentMap string `json:"segmentMap,omitempty"`
-	Duration   string `json:"duration,omitempty"`
-	Seconds    int    `json:"seconds,omitempty"`
-	Size       int64  `json:"size,omitempty"`
-	Chapters   int    `json:"chapters"`
+	Index int `json:"index"`
+	// TitleNumber is the DVD title number, as in titleEntry. It is
+	// absent on a Blu-ray, where SourceFile names a file instead.
+	TitleNumber int    `json:"titleNumber,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Type        string `json:"type,omitempty"`
+	SourceFile  string `json:"sourceFile,omitempty"`
+	SegmentMap  string `json:"segmentMap,omitempty"`
+	Duration    string `json:"duration,omitempty"`
+	Seconds     int    `json:"seconds,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Chapters    int    `json:"chapters"`
 }
 
 // links locates the documents a match does not inline. The first four

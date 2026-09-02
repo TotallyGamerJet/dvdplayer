@@ -487,6 +487,102 @@ stays upstream.
 Follow the paths under @links@ rather than building them. A disc that
 forty films list is stored once, and all forty matches link to that copy.
 
+## Finding the title that is playing
+
+A player knows the DVD title number its navigator is on, 1 to 99. On a
+DVD, @matches[].disc.titleList@ maps that number onto a name:
+
+	for _, t := range match.Disc.TitleList {
+		if t.TitleNumber == playing {
+			// t.Title, t.Type, t.Duration
+		}
+	}
+
+@titleList@ is written for DVDs only, and each entry lines up with the
+entry at the same @index@ in disc.json. @disc.feature@ carries the same
+fields for the main title, plus @titleNumber@.
+
+On a Blu-ray @titleList@ is absent: those discs run to hundreds of
+titles, and carrying them would cost thirty megabytes across the tree
+and quintuple the size of a busy info.json, for a mapping that is not a
+title number anyway. Fetch @links.disc@ and read @Titles@ there.
+
+### What SourceFile holds
+
+@SourceFile@ is spelled differently by format, and the two never mix:
+
+	DVD        the title number in decimal, sometimes zero padded: "1", "01", "27", "99"
+	Blu-ray    a file on the disc: "00020.mpls", "00131.m2ts", occasionally "00002.mpls(1)"
+
+Across the whole data set every DVD title is a decimal in 1 to 99 and no
+Blu-ray title is, so a case folded @Format == "DVD"@ tells you which you
+have. Fold the case: the data spells it @Blu-Ray@, @Blu-ray@, @blu-ray@,
+@UHD@ and @DVD@. Testing for a @.mpls@ suffix is not enough, because
+@.m2ts@ is the commoner of the two.
+
+The @titleNumber@ field exists so that none of this has to be inferred.
+It is written only where the value genuinely is a DVD title number.
+
+### Chapters do not line up
+
+**@Item.Chapters[].Index@ is a position in the list, not a DVD chapter
+number. Do not index it against the chapter your navigator reports.**
+
+MakeMKV takes a title as a run of segments, which need not be the whole
+of the DVD's program chain, and numbers the chapters of what it took
+from 1. Where the two diverge it is visible in the data: a chapter it
+could not name is labelled @Chapter N@ with N the number on the source
+disc, and in 154 of the 202 such labels N is not the entry's Index.
+
+The disc that shows it plainest is A Christmas Carol (2009),
+@E3F840DD2D5B8F7535750EA81CB48D49@: the feature has 17 chapters, of
+which the last is named @Chapter 18@, and a navigator reports 18
+chapters for its DVD title. Its @SegmentMap@ is @7-23,24@, the only
+title on that disc not starting at segment 1, and the only one whose
+running time disagrees with the disc, by nine seconds.
+
+So @feature.chapters@ and @titleList[].chapters@ are honest counts of
+what disc.json holds, not of what the disc has. Chapter names are also
+scarce: 2,355 of 251,685 titles have any at all, 5%% of DVD titles.
+
+## Artwork
+
+@links.cover@, @links.front@ and @links.back@ are absolute URLs into
+TheDiscDb's repository on raw.githubusercontent.com, pinned to the
+commit above, so they are immutable and safe to cache forever whatever
+the five minute max-age on them says. They are served as @image/jpeg@
+with @access-control-allow-origin: *@, so a browser or a wasm player can
+fetch them directly.
+
+	cover   the poster for the film or series. Present on every match.
+	        A 2:3 portrait, 500x750 in nearly every case, occasionally 800x1200.
+	front   the front of the packaging. Present on 99%% of matches, and of
+	        no fixed size or aspect: seen from 750x1025 to 2000x3000.
+	back    the back of the packaging. Present on 41%% of matches, same caveat.
+
+Hand @cover@ to anything that wants a poster. No dimensions are
+published, so read them from the image; nothing but the aspect of
+@cover@ can be assumed. raw.githubusercontent.com is not a CDN and does
+rate limit, so a player should fetch each image once and keep it rather
+than lean on the cache header.
+
+## What is copied and what is derived
+
+@disc.json@ is TheDiscDb's own document for that disc with the
+whitespace taken out and nothing else changed: same fields, same key
+order, same escaping. It is equal to the upstream file when both are
+parsed, but it is **not** byte for byte the same, being about half the
+size. Compare parsed JSON, not bytes.
+
+Everything else in info.json is derived. @title@ and @release@ are
+upstream's metadata.json and release.json inlined the same way.
+@disc.feature@ and @disc.titleList@ are this generator's work: @title@
+there is TheDiscDb's name for the title, or, when it has none, the name
+of the file MakeMKV wrote with its extension removed, and empty when
+that was only a serial number like @title.mkv@ or @B1_t06-09.mkv@. More
+than four titles in five are unnamed upstream, so expect to show a
+duration and a type and no name.
+
 ## Rebuilding
 
 	go tool mage discdb:build

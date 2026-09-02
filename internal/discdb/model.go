@@ -5,6 +5,7 @@ package discdb
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -154,6 +155,59 @@ func normalizeHash(s string) string {
 		}
 	}
 	return s
+}
+
+// dvdTitleNumber reports the DVD title number a title's SourceFile
+// names, and whether the field holds one at all.
+//
+// The two formats spell SourceFile differently and never overlap: on a
+// DVD it is the title number in decimal, sometimes zero padded, and on
+// a Blu-ray it is a file on the disc, either a .mpls playlist or a
+// .m2ts stream, sometimes with a (1) suffix where MakeMKV had to tell
+// two of them apart. Across the whole data set the two go exactly with
+// the format, so this keys off Format and checks the value rather than
+// guessing from the shape of the string alone.
+func dvdTitleNumber(format, sourceFile string) (int, bool) {
+	if !strings.EqualFold(strings.TrimSpace(format), "DVD") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(sourceFile))
+	if err != nil || n < 1 || n > 99 {
+		return 0, false
+	}
+	return n, true
+}
+
+// mediaSuffixes are the containers MakeMKV writes, stripped off a
+// filename before it is offered as a title's name.
+var mediaSuffixes = []string{".mkv", ".m2ts", ".mpls", ".vob", ".mp4", ".ts", ".iso"}
+
+// autoName matches the names MakeMKV makes up when it has nothing to go
+// on: "title.mkv", "title_t00", "B1_t06-09". They are serial numbers
+// dressed as names and worse than no name at all on a Now Playing
+// display, so they are dropped.
+var autoName = regexp.MustCompile(`(?i)^title$|^\d+$|_t\d+(-\d+)?$`)
+
+// itemTitle is the name to show for a title: what TheDiscDb called it,
+// or failing that the name of the file MakeMKV wrote, once that has
+// been shorn of its extension and rejected if it is a serial number.
+// Titles go unnamed upstream more often than not, and an empty string
+// is the honest answer for those.
+func itemTitle(t *srcTitle) string {
+	if s := strings.TrimSpace(t.Item.Title); s != "" {
+		return s
+	}
+	name := strings.TrimSpace(t.Comment)
+	for _, ext := range mediaSuffixes {
+		if strings.HasSuffix(strings.ToLower(name), ext) {
+			name = name[:len(name)-len(ext)]
+			break
+		}
+	}
+	if name == "" || autoName.MatchString(name) {
+		return ""
+	}
+	return name
 }
 
 // durationSeconds turns a "2:11:34" or "11:34" duration into seconds. It

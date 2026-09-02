@@ -320,9 +320,10 @@ func compact(data []byte) json.RawMessage {
 	return json.RawMessage(buf.Bytes())
 }
 
-// summarize picks out the disc's main title: the one it marks as the
-// feature, or failing that the longest, which is the one a player
-// starting the disc cold wants.
+// summarize describes a disc closely enough that a player can put a
+// name on screen without fetching anything else. It picks out the
+// feature, the title the disc marks as the film or failing that the
+// longest, and for a DVD indexes every title on the disc.
 func summarize(d *disc) discSummary {
 	s := discSummary{
 		File:         d.name,
@@ -334,16 +335,35 @@ func summarize(d *disc) discSummary {
 		GlobalDiscId: d.globalDiscID(),
 		Titles:       len(d.meta.Titles),
 	}
+
 	var best *srcTitle
 	for i := range d.meta.Titles {
-		if t := &d.meta.Titles[i]; best == nil || betterFeature(t, best) {
+		t := &d.meta.Titles[i]
+		if best == nil || betterFeature(t, best) {
 			best = t
 		}
+		// The title list is what makes a DVD title number a thing a
+		// reader is told rather than has to work out. A Blu-ray is left
+		// out of it: hundreds of titles a disc, for a mapping that is
+		// not a title number anyway.
+		if n, ok := dvdTitleNumber(d.meta.Format, t.SourceFile); ok {
+			s.TitleList = append(s.TitleList, titleEntry{
+				Index:       t.Index,
+				TitleNumber: n,
+				SourceFile:  t.SourceFile,
+				Title:       itemTitle(t),
+				Type:        t.Item.Type,
+				Duration:    t.Duration,
+				Seconds:     durationSeconds(t.Duration),
+				Chapters:    len(t.Item.Chapters),
+			})
+		}
 	}
+
 	if best != nil {
 		s.Feature = &feature{
 			Index:      best.Index,
-			Title:      best.Item.Title,
+			Title:      itemTitle(best),
 			Type:       best.Item.Type,
 			SourceFile: best.SourceFile,
 			SegmentMap: best.SegmentMap,
@@ -352,8 +372,8 @@ func summarize(d *disc) discSummary {
 			Size:       best.Size,
 			Chapters:   len(best.Item.Chapters),
 		}
-		if s.Feature.Title == "" {
-			s.Feature.Title = best.Comment
+		if n, ok := dvdTitleNumber(d.meta.Format, best.SourceFile); ok {
+			s.Feature.TitleNumber = n
 		}
 	}
 	return s

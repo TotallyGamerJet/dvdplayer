@@ -193,6 +193,11 @@ means TheDiscDb does not have the disc. It carries the film or series
 and the release metadata inline, so one fetch is usually the whole
 answer; follow the paths under <code>links</code> for the rest rather
 than building them yourself.</p>
+<p>On a DVD, <code>disc.titleList</code> maps the DVD title number a
+navigator reports onto a name, a type and a running time, so a player
+need not fetch <code>disc.json</code> to caption what it is playing.
+Chapter indices are positions in that list and are <em>not</em> DVD
+chapter numbers. The <a href="README.md">README</a> has the details.</p>
 <ul>
 <li><a href="index.json">index.json</a> — what this was built from, and how much of each thing it holds</li>
 <li><a href="hashes.txt">hashes.txt</a> — every hash, one to a line, sorted</li>
@@ -236,6 +241,7 @@ than building them yourself.</p>
 <table>
 <tr><th>release<td>{{.Release.Title}}{{if .Release.Year}} ({{.Release.Year}}){{end}}
 <tr><th>disc<td>{{.Disc.Name}} — {{.Disc.Format}}, disc {{.Disc.Index}} of the set
+{{if .Disc.Feature}}{{if .Disc.Feature.TitleNumber}}<tr><th>dvd title<td>{{.Disc.Feature.TitleNumber}} <span class="muted">(the number a navigator reports for the feature)</span>{{end}}{{end}}
 {{if .Disc.Feature}}<tr><th>feature<td>{{.Disc.Feature.Title}}{{if .Disc.Feature.Duration}} — {{.Disc.Feature.Duration}}{{end}}{{if .Disc.Feature.Chapters}}, {{.Disc.Feature.Chapters}} chapters{{end}}{{end}}
 <tr><th>titles on the disc<td>{{.Disc.Titles}}
 {{if .Disc.ContentHash}}<tr><th>content hash<td class="mono break">{{.Disc.ContentHash}}{{end}}
