@@ -90,9 +90,25 @@ type disc struct {
 	audioID streamID
 	audioOK bool
 
-	// spuOn reports whether subpictures should be shown. Menu highlights
-	// are drawn even when it is false, as a player's subtitle switch is
-	// not meant to turn the menus off.
+	// subLang is the language to start a title's subtitles in, packed
+	// as a DVD stores it, or 0 to take whatever the disc offers first.
+	// subLangTitle is the title it was last applied to, so that a title
+	// gets it once and the viewer's own choice stands for the rest of
+	// it.
+	subLang      uint16
+	subLangTitle int32
+
+	// spuOn reports whether subpictures should be shown. It starts
+	// false, the way a set-top player starts with its subtitles off, and
+	// u turns them on.
+	//
+	// What that leaves on screen is what the disc marked for forced
+	// display: the menu overlays a highlight is painted into, so that a
+	// subtitle switch does not turn the menus off, and the subtitles a
+	// disc means to be read whatever the setting — a warning card, a
+	// line of dialogue in another language. On A Christmas Carol the
+	// menu's subpicture is forced and the feature's subtitles are not,
+	// which is the arrangement this relies on.
 	spuOn bool
 
 	// title, part and domain describe where on the disc we are.
@@ -138,15 +154,13 @@ func openDisc(path string, logger *slog.Logger, useCSS, readahead bool) (*disc, 
 		ra = 1
 	}
 	if err := nav.SetReadAheadFlag(ra); err != nil {
-		nav.Close()
-		return nil, err
+		return nil, errors.Join(err, nav.Close())
 	}
 
 	d := &disc{
 		nav:   nav,
 		log:   logger,
 		audio: -1,
-		spuOn: true,
 		done:  make(chan struct{}),
 	}
 	d.spu = [3]int{-1, -1, -1}
@@ -264,7 +278,9 @@ func (d *disc) run() {
 			if !d.drain() {
 				return
 			}
-			_ = d.nav.WaitSkip()
+			if err := d.nav.WaitSkip(); err != nil {
+				d.log.Debug("skipping the wait", "error", err)
+			}
 
 		case dvdnav.EventHopChannel:
 			// A jump: what is queued belongs to where we came from, and
@@ -317,6 +333,13 @@ func (d *disc) run() {
 				d.title, d.part, d.inMenu = title, part, title == 0
 			}
 			d.mu.Unlock()
+			if err == nil && title > 0 && title != d.subLangTitle {
+				// A title is given the subtitles asked for as it is
+				// reached, and left alone after that: within a title
+				// the viewer's own choice is the one that stands.
+				d.subLangTitle = title
+				d.chooseSubpicture()
+			}
 			d.setTime()
 			where := "a menu"
 			if err == nil && title > 0 {
@@ -422,7 +445,9 @@ func (d *disc) holdStill(length int) bool {
 	// An action that left the cell has cleared the still already; asking
 	// to skip it again would eat the next one.
 	if release == stillTimedOut {
-		_ = d.nav.StillSkip()
+		if err := d.nav.StillSkip(); err != nil {
+			d.log.Debug("skipping the still", "error", err)
+		}
 	}
 	return true
 }
@@ -448,14 +473,34 @@ func (d *disc) setTime() {
 	d.streamTime = t
 }
 
-// setPCI takes a copy of the navigator's current NAV packet.
+// setPCI takes a copy of the navigator's current NAV packet, and with it
+// the button the navigator has highlighted.
+//
+// The button is read back rather than left to [dvdnav.EventHighlight],
+// which is raised only when the navigator's own button moves. That is
+// not the same as when the player needs to know it. A menu selects its
+// button as it is entered, before the NAV packets carrying its highlight
+// information arrive; the packets in between carry none, which clears
+// the highlight here — and it would then stay cleared for the whole of
+// the menu, because the navigator's button has not moved and so raises
+// nothing further. The viewer is left on a menu with no highlight on it
+// until something else happens to go and ask, which is what moving the
+// mouse does.
+//
+// It must be called from the navigator's goroutine, as the rest of the
+// event handling is.
 func (d *disc) setPCI() {
 	pci := *d.nav.GetCurrentNavPCI()
+	button, err := d.nav.GetCurrentHighlight()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.pci = &pci
-	if pci.HLI.HlGI.HliSS == 0 {
+	switch {
+	case pci.HLI.HlGI.HliSS == 0:
+		// Nothing on screen to highlight.
 		d.button = 0
+	case err == nil:
+		d.button = button
 	}
 }
 
@@ -506,10 +551,71 @@ func (d *disc) audioStream() (streamID, bool) {
 func (d *disc) subpictureStream() (byte, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.spu[0] < 0 || d.spu[0] > 31 {
+	if d.spu[0] < 0 {
 		return 0, false
 	}
-	return mpg.SubstreamSubpictureMin + byte(d.spu[0]), true
+	// The navigator sets bit 7 to say the subpictures are to be held
+	// back, with only forced ones shown. That is a matter of what gets
+	// drawn rather than of what gets decoded — a forced subtitle is a
+	// unit of the same stream — so the bit comes off here and the
+	// overlay decides. Leaving it on read as no stream at all, and the
+	// player fell back to whichever subpicture turned up first, which is
+	// not the one the disc chose and need not even be its language.
+	stream := d.spu[0] &^ 0x80
+	if stream > 31 {
+		return 0, false
+	}
+	return mpg.SubstreamSubpictureMin + byte(stream), true
+}
+
+// chooseSubpicture picks the subpicture stream a title starts on.
+//
+// A disc that names none leaves the navigator to take the first that
+// exists, which is whichever the disc happens to list first: A Christmas
+// Carol lists French, then Spanish, then English. Where the disc has
+// named one, that one is already selected and this finds it again.
+//
+// It must be called from the navigator's goroutine, as the rest of the
+// event handling is. A language the disc has not got leaves the
+// navigator's choice alone.
+func (d *disc) chooseSubpicture() {
+	if d.subLang == 0 {
+		return
+	}
+	// The count is of streams the program chain offers, but the numbers
+	// it offers them under are not necessarily the first few, so every
+	// number is tried and SetActiveStream turns away the ones the chain
+	// has not got.
+	for stream := range uint8(32) {
+		attr, err := d.nav.GetSPUAttr(stream)
+		if err != nil || attr.LangCode != d.subLang {
+			continue
+		}
+		if err := d.nav.SetActiveStream(stream, dvdnav.SubtitleStream); err != nil {
+			continue
+		}
+		d.log.Debug("subtitles selected by language",
+			"language", langName(d.subLang), "stream", stream)
+		return
+	}
+	d.log.Debug("no subtitles in the language asked for", "language", langName(d.subLang))
+}
+
+// langCode packs a two letter ISO 639 code the way a DVD stores one, or
+// returns 0 for anything that is not one.
+func langCode(s string) uint16 {
+	if len(s) != 2 || s[0] < 'a' || s[0] > 'z' || s[1] < 'a' || s[1] > 'z' {
+		return 0
+	}
+	return uint16(s[0])<<8 | uint16(s[1])
+}
+
+// langName unpacks what [langCode] packed.
+func langName(code uint16) string {
+	if code == 0 {
+		return ""
+	}
+	return string([]byte{byte(code >> 8), byte(code)})
 }
 
 // endStill releases a still the navigator is holding on. resolved says
@@ -582,6 +688,8 @@ func (d *disc) setSPUVisible(on bool) {
 
 // A direction is one of the four ways a viewer can move between the
 // buttons of a menu.
+//
+//go:generate go tool stringer -type=direction
 type direction int
 
 const (
@@ -598,15 +706,21 @@ func (d *disc) selectButton(dir direction) {
 	if !s.menu() {
 		return
 	}
+	var err error
 	switch dir {
 	case dirUp:
-		_ = d.nav.UpperButtonSelect(s.pci)
+		err = d.nav.UpperButtonSelect(s.pci)
 	case dirDown:
-		_ = d.nav.LowerButtonSelect(s.pci)
+		err = d.nav.LowerButtonSelect(s.pci)
 	case dirLeft:
-		_ = d.nav.LeftButtonSelect(s.pci)
+		err = d.nav.LeftButtonSelect(s.pci)
 	case dirRight:
-		_ = d.nav.RightButtonSelect(s.pci)
+		err = d.nav.RightButtonSelect(s.pci)
+	}
+	// A menu whose buttons do not join up in the direction pressed simply
+	// leaves the highlight where it was; the keypress is not an error.
+	if err != nil {
+		d.log.Debug("moving the highlight", "direction", dir, "error", err)
 	}
 	d.syncButton()
 }
@@ -636,7 +750,9 @@ func (d *disc) pointAt(x, y int32, press bool) int32 {
 		return 0
 	}
 	if !press {
-		_ = d.nav.MouseSelect(s.pci, x, y)
+		if err := d.nav.MouseSelect(s.pci, x, y); err != nil {
+			d.log.Debug("moving the highlight to the pointer", "x", x, "y", y, "error", err)
+		}
 		d.syncButton()
 		return 0
 	}

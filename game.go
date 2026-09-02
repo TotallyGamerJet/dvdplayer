@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 
+	"codeberg.org/totallygamerjet/media/discdb"
 	"codeberg.org/totallygamerjet/media/dvdnav"
 	"codeberg.org/totallygamerjet/media/mpg"
 )
@@ -65,6 +67,27 @@ type game struct {
 
 	overlay *overlay
 
+	// look is the DiscDb query for this disc, until its answer has been
+	// picked up and it is set to nil; discDb is that answer, which is
+	// what names the disc and everything on it.
+	look   *discLookup
+	discDb discDbAnswer
+
+	// np is the system's own display of what is playing, npLast what it
+	// was last told and npSent when, and npCommands what its transport
+	// controls have asked for. npChapters are the chapter names of title
+	// npChapterOf, worked out once per title.
+	// label is the name the disc gives itself, which is all there is to
+	// call it by before the database answers.
+	label       string
+	np          nowPlaying
+	npLog       *slog.Logger
+	npLast      nowPlayingState
+	npSent      time.Time
+	npCommands  chan nowPlayingCommand
+	npChapterOf int32
+	npChapters  []discdb.Chapter
+
 	// area is where the picture was last drawn, which is what turns a
 	// mouse position into a position on the disc's menu, and cursor is
 	// where the mouse was, so that it only moves the highlight when it
@@ -73,8 +96,11 @@ type game struct {
 	cursor image.Point
 
 	paused bool
-	osd    bool
-	err    error
+	// osd says the status line is showing. It starts hidden: what it
+	// has to say is for someone looking into what the disc is doing,
+	// and the film is for everyone else.
+	osd bool
+	err error
 
 	// message is a note to the viewer — a stream change, say — and
 	// messageUntil when it stops being shown.
@@ -82,7 +108,7 @@ type game struct {
 	messageUntil time.Time
 }
 
-func newGame(d *disc, p *player) (*game, error) {
+func newGame(d *disc, p *player, look *discLookup, log *slog.Logger) (*game, error) {
 	ctx := audio.NewContext(sampleRate)
 	c := &clock{}
 	track := newAudioTrack(p, c)
@@ -101,17 +127,29 @@ func newGame(d *disc, p *player) (*game, error) {
 		return nil, err
 	}
 
-	g := &game{d: d, p: p, clock: c, track: track, sound: sound, shader: shader, osd: true}
+	g := &game{d: d, p: p, clock: c, track: track, sound: sound, shader: shader, look: look}
 	g.overlay = newOverlay(d, p)
+	// Room for a few commands, so that a viewer working a media key
+	// faster than the player draws does not lose all of it.
+	g.label = d.nav.GetTitleString()
+	g.npCommands = make(chan nowPlayingCommand, 8)
+	g.np = newNowPlaying(g.npCommands, log)
+	g.npLog = log
 	go sound.Play()
 	return g, nil
 }
+
+// close takes the player back off the system's Now Playing display.
+func (g *game) close() { g.np.close() }
 
 func (g *game) Update() error {
 	if g.err != nil {
 		return g.err
 	}
 	g.input()
+	g.runNowPlayingCommands()
+	g.pollDiscDb()
+	g.updateNowPlaying()
 
 	if g.paused {
 		return nil
@@ -221,8 +259,20 @@ func (g *game) notef(format string, args ...any) {
 }
 
 func (g *game) drawOSD(screen *ebiten.Image) {
+	if s := g.osdText(); s != "" {
+		ebitenutil.DebugPrint(screen, s)
+	}
+}
+
+// osdText is what the status line, and any note under it, come to. It is
+// built apart from the drawing so that what it says can be checked
+// without a screen to put it on.
+func (g *game) osdText() string {
 	var b strings.Builder
 	if g.osd {
+		if name := g.name(); name != "" {
+			b.WriteString(name + "\n")
+		}
 		s := g.d.status()
 		where := fmt.Sprintf("title %d chapter %d", s.title, s.part)
 		if s.inMenu {
@@ -241,11 +291,14 @@ func (g *game) drawOSD(screen *ebiten.Image) {
 		fmt.Fprintf(&b, "\n%.0f fps", ebiten.ActualFPS())
 	}
 	if time.Now().Before(g.messageUntil) {
-		fmt.Fprintf(&b, "\n%s", g.message)
+		// A note is shown whether or not the status line is up, so it
+		// is what starts the text when the status line is down.
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(g.message)
 	}
-	if b.Len() > 0 {
-		ebitenutil.DebugPrint(screen, b.String())
-	}
+	return b.String()
 }
 
 // input turns key presses and mouse movement into navigation. The arrow

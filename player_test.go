@@ -36,7 +36,11 @@ func TestPlayDisc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
-	defer d.Close()
+	defer func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("closing the disc: %v", err)
+		}
+	}()
 
 	p := newPlayer(d)
 	d.start()

@@ -157,8 +157,6 @@ type player struct {
 	nextTime    float64
 	framePeriod float64
 
-	clock clock
-
 	// stopped is set once the disc has been played out, and closing
 	// releases the goroutines.
 	stopped bool

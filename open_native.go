@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -29,12 +30,14 @@ func reportFatal(error) {}
 //
 // It opens and reads the way playing does, since that is the sequence known
 // to lift it, and then closes rather than going on to play.
-func unlockDrive(path string, logger *slog.Logger) error {
+func unlockDrive(path string, logger *slog.Logger) (err error) {
 	nav, err := openNav(path, logger, true)
 	if err != nil {
 		return err
 	}
-	defer nav.Close()
+	defer func() {
+		err = errors.Join(err, nav.Close())
+	}()
 
 	var buf [dvdread.DVDVideoLBLen]byte
 	for range 64 {

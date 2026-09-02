@@ -51,7 +51,11 @@ func TestJumpToMenu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
-	defer d.Close()
+	defer func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("closing the disc: %v", err)
+		}
+	}()
 
 	p := newPlayer(d)
 	d.start()
@@ -104,8 +108,24 @@ func TestJumpToMenu(t *testing.T) {
 
 		case jumped.IsZero() && !atMenu.IsZero() && s.menu() &&
 			time.Since(atMenu) > 5*time.Second && shown != nil:
+			// A menu can arrive with no button selected, and there is
+			// then nothing for the press below to press. This is not
+			// the highlight going missing on the way to the player,
+			// which TestMenuHighlight covers: it is the disc's own
+			// doing. The virtual machine's instruction for the
+			// highlighted button register writes whatever the disc
+			// gives it, zero included, while everything that sets the
+			// register in passing leaves a zero alone and the machine
+			// starts with button one. So a disc reaches this only by
+			// asking for it — and libdvdnav expects it to, turning
+			// button zero away in both getCurrentButton and
+			// ButtonActivate. Discs also lean on their pre-commands to
+			// choose the button, the forcibly selected button field of
+			// the NAV packet being 0 on every disc anyone has looked at.
 			if s.button < 1 {
-				_ = d.nav.ButtonSelect(s.pci, 1)
+				if err := d.nav.ButtonSelect(s.pci, 1); err != nil {
+					t.Fatalf("selecting the first button: %v", err)
+				}
 				d.syncButton()
 				s = d.status()
 			}
@@ -214,9 +234,205 @@ func write(t *testing.T, name string, img *image.RGBA) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("closing the image file: %v", err)
+		}
+	}()
 	if err := png.Encode(f, img); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("wrote %s", name)
+}
+
+// TestMenuHighlight checks that a menu arrives with its highlight
+// already on it, without the viewer having to touch anything.
+//
+// The navigator picks a menu's button as it enters the menu and says so
+// once, before the NAV packets carrying the menu's highlight information
+// have arrived; the packets in between carry none, and clear the
+// highlight. A player that took the button only from the event would
+// then spend the whole menu believing nothing was highlighted, since the
+// navigator's button does not move again and raises nothing further —
+// and would show a menu with no mark on it until the viewer moved the
+// mouse, which is what sends the player to ask.
+//
+// It needs the same DVD_TEST_DEVICE as [TestJumpToMenu], and a disc
+// whose root menu has buttons on it.
+func TestMenuHighlight(t *testing.T) {
+	path := os.Getenv("DVD_TEST_DEVICE")
+	if path == "" {
+		t.Skip("set DVD_TEST_DEVICE to a DVD device, image or VIDEO_TS directory")
+	}
+
+	d, err := openDisc(path, slog.New(slog.NewTextHandler(io.Discard, nil)), true, true)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("closing the disc: %v", err)
+		}
+	}()
+
+	p := newPlayer(d)
+	d.start()
+	p.start()
+	defer p.close()
+
+	c := &clock{}
+	track := newAudioTrack(p, c)
+	sound := make([]byte, bytesPerSec/20)
+	var played float64
+	start := time.Now()
+	called := false
+
+	for time.Since(start) < 40*time.Second {
+		if ahead := played - time.Since(start).Seconds(); ahead > 0 {
+			time.Sleep(time.Duration(ahead * float64(time.Second)))
+		}
+		n, err := track.Read(sound)
+		if err != nil {
+			t.Fatalf("read sound: %v", err)
+		}
+		played += float64(n) / bytesPerSec
+		if now, ok := c.now(played); ok {
+			for {
+				f, more := p.nextFrame(now)
+				if !more {
+					break
+				}
+				p.recycle(f)
+			}
+		}
+
+		if !called && time.Since(start) > 6*time.Second {
+			if err := d.menuCall(dvdnav.MenuRoot); err != nil {
+				t.Fatalf("cannot call the root menu: %s", d.nav.ErrToString())
+			}
+			called = true
+			continue
+		}
+
+		// Nothing here presses a key or moves the mouse: the highlight
+		// has to be there of its own accord.
+		s := d.status()
+		if !called || !s.menu() {
+			continue
+		}
+		want, err := d.nav.GetCurrentHighlight()
+		if err != nil {
+			t.Fatalf("cannot read the navigator's highlight: %v", err)
+		}
+		if s.button != want {
+			t.Errorf("the menu shows button %d, but the navigator has %d highlighted",
+				s.button, want)
+		}
+		if s.button < 1 {
+			t.Errorf("a menu of %d buttons arrived with none highlighted",
+				s.pci.HLI.HlGI.BtnNs)
+		}
+		return
+	}
+	t.Fatal("never reached a menu with buttons on it")
+}
+
+// TestMenuSubpictureForced checks what turning the subtitles off rests
+// on: that a menu's overlay is marked for forced display.
+//
+// The highlight is painted into the menu's own subpicture rather than
+// drawn over it, so an overlay the player holds back takes the highlight
+// with it and leaves a menu with nothing marked on it. Subtitles start
+// off, and what keeps the menus visible through that is the forced
+// display flag the disc sets on them. If a disc turns up that does not
+// set it, the menu goes dark and this is where it will show.
+//
+// It needs the same DVD_TEST_DEVICE as [TestJumpToMenu].
+func TestMenuSubpictureForced(t *testing.T) {
+	path := os.Getenv("DVD_TEST_DEVICE")
+	if path == "" {
+		t.Skip("set DVD_TEST_DEVICE to a DVD device, image or VIDEO_TS directory")
+	}
+
+	d, err := openDisc(path, slog.New(slog.NewTextHandler(io.Discard, nil)), true, true)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("closing the disc: %v", err)
+		}
+	}()
+	if d.status().spuOn {
+		t.Error("the subtitles should start off")
+	}
+
+	p := newPlayer(d)
+	d.start()
+	p.start()
+	defer p.close()
+
+	c := &clock{}
+	track := newAudioTrack(p, c)
+	sound := make([]byte, bytesPerSec/20)
+	var played float64
+	start := time.Now()
+	called := false
+	seen, forced := 0, 0
+
+	for time.Since(start) < 40*time.Second {
+		if ahead := played - time.Since(start).Seconds(); ahead > 0 {
+			time.Sleep(time.Duration(ahead * float64(time.Second)))
+		}
+		n, err := track.Read(sound)
+		if err != nil {
+			t.Fatalf("read sound: %v", err)
+		}
+		played += float64(n) / bytesPerSec
+		if now, ok := c.now(played); ok {
+			for {
+				f, more := p.nextFrame(now)
+				if !more {
+					break
+				}
+				p.recycle(f)
+			}
+		}
+
+		if !called && time.Since(start) > 6*time.Second {
+			if err := d.menuCall(dvdnav.MenuRoot); err != nil {
+				t.Fatalf("cannot call the root menu: %s", d.nav.ErrToString())
+			}
+			called = true
+			continue
+		}
+		if !called || !d.status().inMenu {
+			continue
+		}
+		for {
+			u, ok := p.nextSubpicture()
+			if !ok {
+				break
+			}
+			sub, err := spu.Decode(u.data)
+			if err != nil {
+				continue
+			}
+			seen++
+			if sub.Forced {
+				forced++
+			}
+		}
+		if seen > 0 {
+			break
+		}
+	}
+
+	if seen == 0 {
+		t.Fatal("the menu drew no subpicture to check")
+	}
+	if forced != seen {
+		t.Errorf("%d of the menu's %d subpictures are marked for forced display; "+
+			"the ones that are not vanish with the subtitles off", forced, seen)
+	}
 }
