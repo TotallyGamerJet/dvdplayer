@@ -202,7 +202,7 @@ func generate(o Options, repo *git.Repository, commit *object.Commit) error {
 	if err := w.hashes(index); err != nil {
 		return err
 	}
-	dests, err := w.infos(index)
+	dests, rows, err := w.infos(index)
 	if err != nil {
 		return err
 	}
@@ -214,6 +214,9 @@ func generate(o Options, repo *git.Repository, commit *object.Commit) error {
 		return err
 	}
 	if err := w.readme(m); err != nil {
+		return err
+	}
+	if err := w.browse(ds, m, rows); err != nil {
 		return err
 	}
 	fmt.Printf("discdb: done in %s\n", time.Since(start).Round(time.Millisecond))

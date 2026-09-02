@@ -227,20 +227,6 @@ func collect(repo *git.Repository, commit *object.Commit) (*dataset, error) {
 // both, so one flat set of directories holds the two keyspaces, and a
 // hash that ever were both would say so in its group.
 func (ds *dataset) index() map[string]*group {
-	entries := make([]*entry, 0, len(ds.discs)+len(ds.refs))
-	for _, d := range ds.discs {
-		entries = append(entries, &entry{disc: d, rel: d.release})
-	}
-	// A .ref is a release saying it holds a disc described elsewhere.
-	for key, ref := range ds.refs {
-		rel := ds.releases[path.Dir(key)]
-		d := ds.discs[path.Join(ref.ReleasePath, ref.Disc)]
-		if rel == nil || d == nil {
-			continue // a reference upstream has not filled in yet
-		}
-		entries = append(entries, &entry{disc: d, rel: rel, ref: true})
-	}
-
 	index := map[string]*group{}
 	add := func(h, kind string, e *entry) {
 		if h == "" {
@@ -259,7 +245,7 @@ func (ds *dataset) index() map[string]*group {
 		}
 		g.entries = append(g.entries, e)
 	}
-	for _, e := range entries {
+	for _, e := range ds.entries() {
 		add(e.disc.contentHash(), kindContent, e)
 		add(e.disc.globalDiscID(), kindGlobal, e)
 	}
@@ -267,6 +253,25 @@ func (ds *dataset) index() map[string]*group {
 		sort.Slice(g.entries, func(i, j int) bool { return less(g.entries[i], g.entries[j]) })
 	}
 	return index
+}
+
+// entries pairs every disc with each release that holds it: its own, and
+// any that reach it through a .ref.
+func (ds *dataset) entries() []*entry {
+	out := make([]*entry, 0, len(ds.discs)+len(ds.refs))
+	for _, d := range ds.discs {
+		out = append(out, &entry{disc: d, rel: d.release})
+	}
+	// A .ref is a release saying it holds a disc described elsewhere.
+	for key, ref := range ds.refs {
+		rel := ds.releases[path.Dir(key)]
+		d := ds.discs[path.Join(ref.ReleasePath, ref.Disc)]
+		if rel == nil || d == nil {
+			continue // a reference upstream has not filled in yet
+		}
+		out = append(out, &entry{disc: d, rel: rel, ref: true})
+	}
+	return out
 }
 
 // group is everything filed under one hash: the releases that hold the

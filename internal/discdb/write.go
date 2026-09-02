@@ -116,9 +116,11 @@ func (w *writer) hashes(index map[string]*group) error {
 // first match to want a disc document keeps it and the rest link to
 // that one, which is why a reader follows links.disc instead of
 // building the path itself.
-func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, error) {
+func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, []discRow, error) {
 	dests := map[plumbing.Hash][]string{}
+	rows := make([]discRow, 0, len(index))
 	for hash, g := range index {
+		views := make([]matchView, 0, len(g.entries))
 		doc := info{
 			Schema:  schemaVersion,
 			Hash:    hash,
@@ -136,31 +138,188 @@ func (w *writer) infos(index map[string]*group) (map[plumbing.Hash][]string, err
 			}
 
 			t := e.rel.title
+			summary := summarize(e.disc)
+			lnks := links{
+				Disc:   discPath,
+				Title:  path.Join("titles", t.meta.Slug, "metadata.json"),
+				Tmdb:   w.titleLink(t, t.tmdb, "tmdb.json"),
+				Imdb:   w.titleLink(t, t.imdb, "imdb.json"),
+				Cover:  w.artwork(t.cover, t.dir, "cover.jpg"),
+				Front:  w.artwork(e.rel.front, e.rel.dir, "front.jpg"),
+				Back:   w.artwork(e.rel.back, e.rel.dir, "back.jpg"),
+				Source: w.upstream(path.Join(e.disc.release.dir, e.disc.name+".json")),
+			}
 			doc.Matches = append(doc.Matches, match{
 				Index:      i,
 				Collection: e.rel.dir,
 				Kind:       t.kind,
 				Ref:        e.ref,
-				Disc:       summarize(e.disc),
+				Disc:       summary,
 				Title:      t.raw,
 				Release:    e.rel.raw,
-				Links: links{
-					Disc:   discPath,
-					Title:  path.Join("titles", t.meta.Slug, "metadata.json"),
-					Tmdb:   w.titleLink(t, t.tmdb, "tmdb.json"),
-					Imdb:   w.titleLink(t, t.imdb, "imdb.json"),
-					Cover:  w.artwork(t.cover, t.dir, "cover.jpg"),
-					Front:  w.artwork(e.rel.front, e.rel.dir, "front.jpg"),
-					Back:   w.artwork(e.rel.back, e.rel.dir, "back.jpg"),
-					Source: w.upstream(path.Join(e.disc.release.dir, e.disc.name+".json")),
-				},
+				Links:      lnks,
+			})
+			views = append(views, matchView{
+				Index:      i,
+				Collection: e.rel.dir,
+				Kind:       t.kind,
+				Ref:        e.ref,
+				Title:      t.meta,
+				Release:    e.rel.meta,
+				Disc:       summary,
+				Links:      lnks,
 			})
 		}
 		if err := w.json(w.path(discsDir, hash, "info.json"), doc); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+
+		kinds := g.kinds()
+		if err := w.render(path.Join(discsDir, hash, "index.html"), "disc", discView{
+			page:    page{Title: hash, Base: "../../"},
+			Hash:    hash,
+			Kinds:   kindNames(kinds, "content hash", "global disc id"),
+			Matches: views,
+		}); err != nil {
+			return nil, nil, err
+		}
+		rows = append(rows, discRow{
+			Hash:   hash,
+			Kinds:  kindNames(kinds, "content", "global"),
+			Name:   views[0].Disc.Name,
+			Format: views[0].Disc.Format,
+			Title:  views[0].Title.FullTitle,
+			More:   len(views) - 1,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Hash < rows[j].Hash })
+	return dests, rows, nil
+}
+
+// kindNames spells the hash kinds the way a person reads them, at the
+// length the page has room for.
+func kindNames(kinds []string, content, global string) string {
+	out := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		switch k {
+		case kindContent:
+			out = append(out, content)
+		case kindGlobal:
+			out = append(out, global)
 		}
 	}
-	return dests, nil
+	return strings.Join(out, " · ")
+}
+
+// render writes one of the browsable pages.
+func (w *writer) render(p, name string, data any) error {
+	var buf bytes.Buffer
+	if err := pages.ExecuteTemplate(&buf, name, data); err != nil {
+		return fmt.Errorf("discdb: rendering %s: %w", p, err)
+	}
+	return writeFile(w.path(p), buf.Bytes())
+}
+
+// browse writes the pages that make the tree walkable in a browser: the
+// stylesheet they share, the front page, the list of hashes, and a page
+// for every film and series.
+func (w *writer) browse(ds *dataset, m manifest, rows []discRow) error {
+	if err := writeFile(w.path("style.css"), []byte(styleCSS)); err != nil {
+		return err
+	}
+	if err := w.render("index.html", "root", rootView{
+		page:     page{Title: "discdb"},
+		Manifest: m,
+		Repo:     w.opts.Repo,
+	}); err != nil {
+		return err
+	}
+	if err := w.render(path.Join(discsDir, "index.html"), "discs", discsView{
+		page: page{Title: "Discs", Base: "../"},
+		Rows: rows,
+	}); err != nil {
+		return err
+	}
+	return w.titlePages(ds)
+}
+
+// titlePages writes titles/index.html and a page for each title, listing
+// the releases it has and the discs in them.
+func (w *writer) titlePages(ds *dataset) error {
+	byTitle := map[*title][]*entry{}
+	for _, e := range ds.entries() {
+		byTitle[e.rel.title] = append(byTitle[e.rel.title], e)
+	}
+
+	rows := make([]titleRow, 0, len(ds.titles))
+	for _, t := range ds.titles {
+		entries := byTitle[t]
+		rows = append(rows, titleRow{
+			Slug:  t.meta.Slug,
+			Title: t.meta.FullTitle,
+			Year:  t.meta.Year,
+			Kind:  t.kind,
+			Discs: len(entries),
+		})
+		if err := w.titlePage(t, entries); err != nil {
+			return err
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := strings.ToLower(rows[i].Title), strings.ToLower(rows[j].Title)
+		if a != b {
+			return a < b
+		}
+		return rows[i].Slug < rows[j].Slug
+	})
+	return w.render(path.Join("titles", "index.html"), "titles", titlesView{
+		page: page{Title: "Films and series", Base: "../"},
+		Rows: rows,
+	})
+}
+
+// titlePage writes one film or series, its releases and their discs.
+func (w *writer) titlePage(t *title, entries []*entry) error {
+	sort.Slice(entries, func(i, j int) bool {
+		if a, b := entries[i].rel.dir, entries[j].rel.dir; a != b {
+			return a < b
+		}
+		return entries[i].disc.name < entries[j].disc.name
+	})
+
+	var groups []releaseGroup
+	for _, e := range entries {
+		// A disc is linked by the hash it is filed under, preferring the
+		// one a player can work out for itself.
+		hash := e.disc.contentHash()
+		if hash == "" {
+			hash = e.disc.globalDiscID()
+		}
+		if hash == "" {
+			continue // a disc with no hash cannot be looked up
+		}
+		if len(groups) == 0 || groups[len(groups)-1].Path != e.rel.dir {
+			groups = append(groups, releaseGroup{Release: e.rel.meta, Path: e.rel.dir})
+		}
+		g := &groups[len(groups)-1]
+		g.Discs = append(g.Discs, releaseDisc{
+			Hash:   hash,
+			Name:   e.disc.meta.Name,
+			Format: e.disc.meta.Format,
+			Index:  e.disc.meta.Index,
+			Ref:    e.ref,
+		})
+	}
+
+	return w.render(path.Join("titles", t.meta.Slug, "index.html"), "title", titleView{
+		page:   page{Title: t.meta.FullTitle, Base: "../../"},
+		Meta:   t.meta,
+		Kind:   t.kind,
+		Tmdb:   !t.tmdb.IsZero(),
+		Imdb:   !t.imdb.IsZero(),
+		Cover:  w.artwork(t.cover, t.dir, "cover.jpg"),
+		Groups: groups,
+	})
 }
 
 func (w *writer) titleLink(t *title, blob plumbing.Hash, name string) string {
@@ -295,6 +454,7 @@ Every path below is relative to this directory.
 	discs/<HASH>/info.json        the disc that hashes to HASH
 	discs/<HASH>/<n>/disc.json    that disc as TheDiscDb describes it
 	titles/<slug>/                metadata.json, tmdb.json and imdb.json for one film or series
+	index.html                    in each of those directories, the same thing to read in a browser
 
 A hash is upper case hex. Each disc is filed under both of the hashes
 TheDiscDb knows it by:
@@ -306,6 +466,10 @@ TheDiscDb knows it by:
 
 Both are 32 hex digits on a DVD, so the length of a hash does not say
 which kind it is. The @types@ field of info.json does.
+
+Every directory also holds an index.html, so the published site can be
+browsed: the front page links to a list of all the hashes and a list of
+all the films and series, both of which filter as you type.
 
 ## Looking up a disc
 

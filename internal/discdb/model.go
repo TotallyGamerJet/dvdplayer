@@ -48,13 +48,20 @@ type srcTitle struct {
 
 // srcMeta is a title's metadata.json, the film or series the discs hold.
 type srcMeta struct {
-	Title       string
-	FullTitle   string
-	SortTitle   string
-	Slug        string
-	Type        string
-	Year        int
-	ExternalIds struct {
+	Title         string
+	FullTitle     string
+	SortTitle     string
+	Slug          string
+	Type          string
+	Year          int
+	Plot          string
+	Tagline       string
+	Genres        string
+	Directors     string
+	Stars         string
+	Runtime       string
+	ContentRating string
+	ExternalIds   struct {
 		Tmdb string
 		Imdb string
 	}
