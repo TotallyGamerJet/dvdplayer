@@ -34,10 +34,6 @@ func (s nowPlayingState) names(t nowPlayingState) bool {
 		s.duration == t.duration && s.playing == t.playing
 }
 
-// empty reports that there is nothing to call the disc, and so nothing
-// worth putting on the system's display.
-func (s nowPlayingState) empty() bool { return s.title == "" }
-
 // A nowPlayingCommand is a transport control the system worked, rather
 // than the viewer: a media key, or a button in the Now Playing panel.
 type nowPlayingCommand int
@@ -58,6 +54,10 @@ type nowPlaying interface {
 	// update tells the system what is playing now. It is called only
 	// when that has changed.
 	update(nowPlayingState)
+	// artwork gives the system the picture to show beside it, as a
+	// JPEG. It is called once, when the database answers, and with nil
+	// where there was no picture to be had.
+	artwork(jpeg []byte)
 	// close takes the player back off the system's display.
 	close()
 }
@@ -66,6 +66,7 @@ type nowPlaying interface {
 type nopNowPlaying struct{}
 
 func (nopNowPlaying) update(nowPlayingState) {}
+func (nopNowPlaying) artwork([]byte)         {}
 func (nopNowPlaying) close()                 {}
 
 // nowPlayingDrift is how far the system's idea of where the disc is may
@@ -82,13 +83,9 @@ func (g *game) updateNowPlaying() {
 	if g.np == nil {
 		return
 	}
+	// A disc nothing names still goes up: the transport and the clock
+	// are worth having without a title, and a title may yet come.
 	s := g.nowPlayingState()
-	if s.empty() {
-		// Nothing names this disc: it is not in the database and it
-		// does not name itself. An empty panel reads as a broken one,
-		// so there is none.
-		return
-	}
 	if s.names(g.npLast) && !g.npDrifted(s) {
 		return
 	}
@@ -118,8 +115,7 @@ func (g *game) npDrifted(s nowPlayingState) bool {
 // is and what the database said about it.
 //
 // Until the lookup comes back — and afterwards, for a disc the database
-// does not have — all there is to go on is the name the disc gives
-// itself, which many discs leave blank.
+// does not have — all there is to go on is what the disc calls itself.
 func (g *game) nowPlayingState() nowPlayingState {
 	s := g.d.status()
 	np := nowPlayingState{
@@ -133,25 +129,18 @@ func (g *game) nowPlayingState() nowPlayingState {
 		return np
 	}
 
-	work := m.Title.Title
-	if work == "" {
-		work = m.Title.FullTitle
-	}
+	work := workName(m)
 	np.title = work
 	if np.album = m.Release.Title; np.album == "" {
 		np.album = m.Disc.Name
 	}
-	if s.inMenu {
-		// A menu belongs to the disc rather than to anything on it, so
-		// the work is all there is to say.
-		return np
-	}
-
-	seg := segmentOf(g.discDb.disc, s.title)
+	seg, name := playing(m, s)
 	if seg == nil {
+		// A menu, or a title nobody has listed: the work is all there
+		// is to say.
 		return np
 	}
-	if name := seg.Item.Title; name != "" && name != work {
+	if name != "" {
 		// An episode, a deleted scene, a featurette: the thing playing
 		// is what to show, and the work is what it belongs to.
 		np.title, np.artist = name, work

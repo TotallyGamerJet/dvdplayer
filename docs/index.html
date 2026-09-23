@@ -108,8 +108,12 @@
     .blinking { animation: blink 1.5s step-end infinite; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
-    #pick {
-        margin-top: 1.5rem;
+    /* .button is shared by #pick, a real <button>, and the <label> that
+       fronts the plain file input — a label styled this way and pointed at
+       a hidden input with "for" is the usual way to get a file picker that
+       does not look like the browser's own control. */
+    .button {
+        display: inline-block;
         padding: 0.8rem 2rem;
         background: transparent;
         border: 2px solid #00ff00;
@@ -124,13 +128,18 @@
         text-shadow: 0 0 5px #00ff00;
         box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
     }
-    #pick:hover:not(:disabled) {
+    .button:hover:not(:disabled) {
         background: rgba(0, 255, 0, 0.1);
         box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
         text-shadow: 0 0 10px #00ff00;
     }
-    #pick:active:not(:disabled) { transform: scale(0.98); }
-    #pick:disabled { opacity: 0.4; cursor: default; }
+    .button:active:not(:disabled) { transform: scale(0.98); }
+    .button:disabled, .button.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    /* The two pickers sit side by side where both are offered, and #pick is
+       taken out of the flow entirely — not just hidden — where the browser
+       has no directory picker to open. */
+    .pickers { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; margin-top: 1.5rem; }
+    #pick.unsupported { display: none; }
 
     /* Amber rather than red: still of the same screen. */
     #error code {
@@ -159,10 +168,14 @@
         <h1>DVD Player</h1>
         <p class="status" id="state">// SYSTEM INITIALIZING <span class="blinking">_</span></p>
         <p class="status" id="error"></p>
-        <button id="pick" disabled>Starting…</button>
+        <div class="pickers">
+            <button id="pick" class="button" disabled>Starting…</button>
+            <label id="pickFileLabel" for="pickFile" class="button disabled">Open ISO / CDR File</label>
+            <input type="file" id="pickFile" accept=".iso,.cdr,.img,.nrg" hidden>
+        </div>
         <p class="status" id="hint">
-            Choose the folder holding the disc's VIDEO_TS directory. The disc is
-            read and descrambled in the browser; nothing is uploaded.
+            Choose the folder holding the disc's VIDEO_TS directory, or a single
+            ISO or cdr image of one.
         </p>
     </div>
 </div>
@@ -170,16 +183,31 @@
 <script src="wasm_exec.js"></script>
 <script>
     const button = document.getElementById("pick");
+    const fileLabel = document.getElementById("pickFileLabel");
     const error = document.getElementById("error");
     const status = document.getElementById("state");
 
+    // The directory picker is the File System Access API's
+    // showDirectoryPicker, Chromium only as of writing. Where it is missing,
+    // the button is taken out of the page rather than left there disabled —
+    // Go never enables it either, since it goes by the same check — and the
+    // file input is the one way in, which every browser this runs in offers.
+    const haveDirPicker = !!window.showDirectoryPicker;
+    if (!haveDirPicker) {
+        button.classList.add("unsupported");
+    }
+
     // dvdplay calls these as it goes: it is the only side that can tell when
-    // the button is live, or a disc that opened from a folder that held none.
-    // The picker itself is opened by Go from inside the press, which is what
-    // keeps the gesture the browser insists on.
+    // the pickers are live, or that a disc opened from a folder or file that
+    // held none. Each picker is opened by Go from inside its own press or
+    // change event, which is what keeps the gesture the browser insists on
+    // for the directory picker, and is harmless for the plain file input.
     window.dvdplayReady = () => {
-        button.disabled = false;
-        button.textContent = "Open Disc";
+        if (haveDirPicker) {
+            button.disabled = false;
+            button.textContent = "Open Disc Folder";
+        }
+        fileLabel.classList.remove("disabled");
         status.innerHTML = '// READY <span class="blinking">_</span>';
     };
     window.dvdplayStarted = (name) => {
@@ -188,7 +216,9 @@
     };
     window.dvdplayFailed = (message) => {
         showError(message);
-        button.textContent = "Choose Another Folder";
+        // The file input clears its own selection choosing the same file
+        // again would otherwise not raise a change event for.
+        document.getElementById("pickFile").value = "";
     };
 
     // Set the message as text, then mark up anything the viewer is meant to
@@ -213,14 +243,9 @@
         status.innerHTML = "// PLAYBACK STOPPED";
         showError(message);
         button.disabled = true;
+        fileLabel.classList.add("disabled");
         button.textContent = "Reload To Try Again";
     };
-
-    if (!window.showDirectoryPicker) {
-        error.textContent =
-            "// NO DIRECTORY PICKER: reading a disc needs the File System Access " +
-            "API, which today means a Chromium browser — Chrome, Edge or Opera.";
-    }
 
     const go = new Go();
     WebAssembly.instantiateStreaming(fetch("dvdplay.wasm"), go.importObject)

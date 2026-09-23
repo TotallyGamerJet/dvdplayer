@@ -61,18 +61,26 @@ type mediaPlayer struct {
 	// The Now Playing info dictionary keys.
 	title, artist, album           objc.ID
 	duration, elapsed, rate, media objc.ID
+	artwork                        objc.ID
 
 	nsString, nsNumber, nsDictionary objc.Class
+	nsData, nsImage, mediaArtwork    objc.Class
 	infoCenter, commandCenter        objc.Class
 
 	stringWithUTF8String, numberWithDouble, numberWithInt objc.SEL
 	dictionary, setObjectForKey                           objc.SEL
 	defaultCenter, setNowPlayingInfo, setPlaybackState    objc.SEL
 	sharedCommandCenter, setEnabled, addTargetWithHandler objc.SEL
+	alloc, dataWithBytesLength, initWithData, size        objc.SEL
+	initWithBoundsSizeRequestHandler                      objc.SEL
 
 	poolPush func() unsafe.Pointer
 	poolPop  func(unsafe.Pointer)
 }
+
+// cgSize is CGSize, which the artwork is measured in. It goes to and
+// from Objective-C by value.
+type cgSize struct{ width, height float64 }
 
 // loadMediaPlayer opens the frameworks and looks everything up. It is
 // run at most once, whether or not it succeeded.
@@ -86,11 +94,20 @@ var loadMediaPlayer = sync.OnceValues(func() (*mediaPlayer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dvdplay: cannot load libobjc: %w", err)
 	}
+	// NSImage is AppKit's, and the artwork is made of one.
+	if _, err := purego.Dlopen("/System/Library/Frameworks/AppKit.framework/AppKit",
+		purego.RTLD_GLOBAL|purego.RTLD_NOW); err != nil {
+		return nil, fmt.Errorf("dvdplay: cannot load AppKit: %w", err)
+	}
 
 	m := &mediaPlayer{
 		nsString:     objc.GetClass("NSString"),
 		nsNumber:     objc.GetClass("NSNumber"),
 		nsDictionary: objc.GetClass("NSMutableDictionary"),
+
+		nsData:       objc.GetClass("NSData"),
+		nsImage:      objc.GetClass("NSImage"),
+		mediaArtwork: objc.GetClass("MPMediaItemArtwork"),
 
 		infoCenter:    objc.GetClass("MPNowPlayingInfoCenter"),
 		commandCenter: objc.GetClass("MPRemoteCommandCenter"),
@@ -106,6 +123,12 @@ var loadMediaPlayer = sync.OnceValues(func() (*mediaPlayer, error) {
 		sharedCommandCenter:  objc.RegisterName("sharedCommandCenter"),
 		setEnabled:           objc.RegisterName("setEnabled:"),
 		addTargetWithHandler: objc.RegisterName("addTargetWithHandler:"),
+
+		alloc:                            objc.RegisterName("alloc"),
+		dataWithBytesLength:              objc.RegisterName("dataWithBytes:length:"),
+		initWithData:                     objc.RegisterName("initWithData:"),
+		size:                             objc.RegisterName("size"),
+		initWithBoundsSizeRequestHandler: objc.RegisterName("initWithBoundsSize:requestHandler:"),
 	}
 	for _, c := range []struct {
 		name string
@@ -114,6 +137,8 @@ var loadMediaPlayer = sync.OnceValues(func() (*mediaPlayer, error) {
 		{"NSString", m.nsString},
 		{"NSNumber", m.nsNumber},
 		{"NSMutableDictionary", m.nsDictionary},
+		{"NSData", m.nsData}, {"NSImage", m.nsImage},
+		{"MPMediaItemArtwork", m.mediaArtwork},
 		{"MPNowPlayingInfoCenter", m.infoCenter},
 		{"MPRemoteCommandCenter", m.commandCenter},
 	} {
@@ -133,6 +158,7 @@ var loadMediaPlayer = sync.OnceValues(func() (*mediaPlayer, error) {
 		{"MPNowPlayingInfoPropertyElapsedPlaybackTime", &m.elapsed},
 		{"MPNowPlayingInfoPropertyPlaybackRate", &m.rate},
 		{"MPNowPlayingInfoPropertyMediaType", &m.media},
+		{"MPMediaItemPropertyArtwork", &m.artwork},
 	} {
 		p, err := purego.Dlsym(mp, k.name)
 		if err != nil || p == 0 {
@@ -170,6 +196,11 @@ type macNowPlaying struct {
 	// too: releasing one the system still has would leave it calling
 	// into freed memory.
 	blocks []objc.Block
+
+	// art is the disc's cover, made once and put on every update after.
+	// It and the image behind it are owned rather than autoreleased, so
+	// they outlive the pool the update that made them ran under.
+	art objc.ID
 }
 
 // newNowPlaying puts the player on macOS's Now Playing display and takes
@@ -265,9 +296,50 @@ func (n *macNowPlaying) update(s nowPlayingState) {
 		rate, state = 0, mpPlaybackStatePaused
 	}
 	set(m.rate, m.num(rate))
+	set(m.artwork, n.art)
 
 	n.center.Send(m.setNowPlayingInfo, info)
 	n.center.Send(m.setPlaybackState, uint(state))
+}
+
+// artwork makes the picture the system shows beside what is playing.
+//
+// MPMediaItemArtwork is not the picture but a way of asking for it: it
+// is made with the size the picture is and a handler the system calls
+// back with the size it wants, and here that hands back the one picture
+// there is whatever is asked for. macOS scales it.
+//
+// A disc with no cover, or one whose cover would not load, leaves the
+// display as it was rather than clearing it.
+func (n *macNowPlaying) artwork(jpeg []byte) {
+	if len(jpeg) == 0 {
+		return
+	}
+	m := n.mp
+	pool := m.poolPush()
+	defer m.poolPop(pool)
+
+	data := objc.ID(m.nsData).Send(m.dataWithBytesLength, unsafe.Pointer(&jpeg[0]), uint64(len(jpeg)))
+	if data == 0 {
+		return
+	}
+	img := objc.ID(m.nsImage).Send(m.alloc).Send(m.initWithData, data)
+	if img == 0 {
+		n.log.Debug("the cover is not a picture macOS can read")
+		return
+	}
+	size := objc.Send[cgSize](img, m.size)
+	// The handler outlives this call, so it is kept alongside the block
+	// that holds it.
+	block := objc.NewBlock(func(objc.Block, cgSize) objc.ID { return img })
+	art := objc.ID(m.mediaArtwork).Send(m.alloc).Send(m.initWithBoundsSizeRequestHandler, size, block)
+	if art == 0 {
+		n.log.Debug("cannot make the artwork")
+		return
+	}
+	n.blocks = append(n.blocks, block)
+	n.art = art
+	n.log.Debug("cover ready", "width", size.width, "height", size.height)
 }
 
 // close clears the display, so that a player that has quit is not left

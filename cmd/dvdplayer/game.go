@@ -79,7 +79,9 @@ type game struct {
 	// npChapterOf, worked out once per title.
 	// label is the name the disc gives itself, which is all there is to
 	// call it by before the database answers.
-	label       string
+	label string
+	// titled is what the window's title was last set to name.
+	titled      string
 	np          nowPlaying
 	npLog       *slog.Logger
 	npLast      nowPlayingState
@@ -129,9 +131,9 @@ func newGame(d *disc, p *player, look *discLookup, log *slog.Logger) (*game, err
 
 	g := &game{d: d, p: p, clock: c, track: track, sound: sound, shader: shader, look: look}
 	g.overlay = newOverlay(d, p)
+	g.label = discLabel(d.nav)
 	// Room for a few commands, so that a viewer working a media key
 	// faster than the player draws does not lose all of it.
-	g.label = d.nav.GetTitleString()
 	g.npCommands = make(chan nowPlayingCommand, 8)
 	g.np = newNowPlaying(g.npCommands, log)
 	g.npLog = log
@@ -150,6 +152,7 @@ func (g *game) Update() error {
 	g.runNowPlayingCommands()
 	g.pollDiscDb()
 	g.updateNowPlaying()
+	g.retitle()
 
 	if g.paused {
 		return nil
@@ -383,6 +386,9 @@ func (g *game) input() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyS) {
 		g.cycleStream(dvdnav.SubtitleStream)
 	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
+		g.cycleAngle()
+	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyU) {
 		s := g.d.status()
 		g.d.setSPUVisible(!s.spuOn)
@@ -469,6 +475,26 @@ func (g *game) cycleStream(kind dvdnav.StreamType) {
 		return
 	}
 	g.notef("%s stream %d of %d", name, next+1, n)
+}
+
+// cycleAngle moves to the next camera angle of the scene playing, and
+// from the last back round to the first.
+func (g *game) cycleAngle() {
+	cur, n, err := g.d.nav.GetAngleInfo()
+	if err != nil {
+		g.notef("cannot read the angle: %s", g.d.nav.ErrToString())
+		return
+	}
+	if n <= 1 {
+		g.notef("angle %d of %d", max(cur, 1), max(n, 1))
+		return
+	}
+	next := cur%n + 1
+	if err := g.d.nav.AngleChange(next); err != nil {
+		g.notef("cannot select angle %d: %s", next, g.d.nav.ErrToString())
+		return
+	}
+	g.notef("angle %d of %d", next, n)
 }
 
 func onOff(b bool) string {

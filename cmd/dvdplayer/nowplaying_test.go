@@ -4,6 +4,7 @@
 package main
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -129,6 +130,40 @@ func TestNowPlayingDrift(t *testing.T) {
 			}
 			if got := g.npDrifted(nowPlayingState{elapsed: tt.now}); got != tt.want {
 				t.Errorf("npDrifted = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// recordingNowPlaying keeps what the system was told.
+type recordingNowPlaying struct{ got []nowPlayingState }
+
+func (r *recordingNowPlaying) update(s nowPlayingState) { r.got = append(r.got, s) }
+func (r *recordingNowPlaying) artwork([]byte)           {}
+func (r *recordingNowPlaying) close()                   {}
+
+// TestNowPlayingWithoutAName checks that a disc nothing names still gets
+// its transport and its clock onto the system's display. A disc ripped
+// to an image, or one the database has not got, is still being played,
+// and the play state and elapsed time are worth having with or without
+// a title.
+func TestNowPlayingWithoutAName(t *testing.T) {
+	for _, label := range []string{"", "THE_LAST_JEDI"} {
+		t.Run("label "+label, func(t *testing.T) {
+			rec := &recordingNowPlaying{}
+			g := &game{d: &disc{}, np: rec, npLog: slog.New(slog.DiscardHandler), label: label}
+			g.d.streamTime, g.d.pgcLength = 90000*42, 90000*9102
+
+			g.updateNowPlaying()
+			if len(rec.got) != 1 {
+				t.Fatalf("the system was told %d times, want once", len(rec.got))
+			}
+			s := rec.got[0]
+			if s.title != label {
+				t.Errorf("title = %q, want what the disc calls itself, %q", s.title, label)
+			}
+			if !s.playing || s.elapsed != 42*time.Second || s.duration != 9102*time.Second {
+				t.Errorf("state = %+v, want playing at 42s of 2h31m42s", s)
 			}
 		})
 	}

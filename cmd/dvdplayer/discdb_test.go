@@ -4,8 +4,6 @@
 package main
 
 import (
-	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -53,70 +51,9 @@ var videoTS = []file{
 	{"VTS_11_1.VOB", 114688},
 }
 
-// titleSets is what VIDEO_TS.IFO would say about videoTS. Title sets 3 to
-// 8 are missing from the listing, so that a hole is exercised too.
-const titleSets = 11
-
-// fakeDisc answers stats out of a listing of VIDEO_TS, the way dvdread
-// answers them out of the disc's own filesystem.
-type fakeDisc struct {
-	sizes map[string]int64
-}
-
-func newFakeDisc(files []file) *fakeDisc {
-	sizes := make(map[string]int64, len(files))
-	for _, f := range files {
-		sizes[f.name] = f.size
-	}
-	return &fakeDisc{sizes}
-}
-
-func (d *fakeDisc) Stat(title int, dom dvdread.Domain) (dvdread.FileStat, error) {
-	stat := func(name string) (dvdread.FileStat, error) {
-		size, ok := d.sizes[name]
-		if !ok {
-			return dvdread.FileStat{}, fmt.Errorf("%s is not on the disc", name)
-		}
-		return dvdread.FileStat{Size: size, Parts: []int64{size}}, nil
-	}
-	prefix := "VIDEO_TS"
-	if title > 0 {
-		prefix = fmt.Sprintf("VTS_%02d_0", title)
-	}
-	switch dom {
-	case dvdread.BackupFile:
-		return stat(prefix + ".BUP")
-	case dvdread.InfoFile:
-		return stat(prefix + ".IFO")
-	case dvdread.MenuVOBs:
-		return stat(prefix + ".VOB")
-	case dvdread.TitleVOBs:
-		if title == 0 {
-			return dvdread.FileStat{}, errors.New("the video manager has no title VOBs")
-		}
-		// dvdread reports the numbered parts as one file, and stops at
-		// the first number the disc has not got.
-		var st dvdread.FileStat
-		for part := 1; part < 10; part++ {
-			size, ok := d.sizes[fmt.Sprintf("VTS_%02d_%d.VOB", title, part)]
-			if !ok {
-				break
-			}
-			st.Size += size
-			st.Parts = append(st.Parts, size)
-		}
-		if len(st.Parts) == 0 {
-			return dvdread.FileStat{}, fmt.Errorf("VTS_%02d_1.VOB is not on the disc", title)
-		}
-		return st, nil
-	}
-	return dvdread.FileStat{}, fmt.Errorf("cannot stat the %s of title %d", dom, title)
-}
-
-// TestHashDisc checks that hashing a disc through its own filesystem —
-// which is all a player given a device or an ISO image can do — gives
-// what hashing a mounted VIDEO_TS directory gives. The two have to agree
-// or the lookup finds nothing.
+// TestHashDisc checks that hashing a disc through the filesystem it
+// hands out gives what hashing the same tree as a directory gives. The
+// two have to agree or the lookup finds nothing.
 func TestHashDisc(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "TEST_DISC")
 	videoTSDir := filepath.Join(dir, "VIDEO_TS")
@@ -140,7 +77,17 @@ func TestHashDisc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := hashDisc(newFakeDisc(videoTS), titleSets)
+
+	r, err := dvdread.Open(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("opening the disc: %v", err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("closing the disc: %v", err)
+		}
+	}()
+	got, err := hashDisc(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,25 +96,20 @@ func TestHashDisc(t *testing.T) {
 	}
 }
 
-// TestVideoTSSizesOrder checks the listing itself, since the order the
-// sizes go into the hash in is the whole of its meaning.
-func TestVideoTSSizesOrder(t *testing.T) {
-	got := videoTSSizes(newFakeDisc(videoTS), titleSets)
-	if len(got) != len(videoTS) {
-		t.Fatalf("%d files, want %d", len(got), len(videoTS))
-	}
-	for i, f := range videoTS {
-		if got[i] != f.size {
-			t.Errorf("file %d is %d bytes, want %s at %d", i, got[i], f.name, f.size)
-		}
-	}
-}
-
-// TestHashDiscEmpty checks that a disc nothing could be stat'ed on is
-// reported rather than hashed to the MD5 of nothing, which would be
-// looked up and could only ever be wrong.
+// TestHashDiscEmpty checks that a disc with nothing on it is reported
+// rather than hashed to the MD5 of nothing, which would be looked up and
+// could only ever be wrong.
 func TestHashDiscEmpty(t *testing.T) {
-	if _, err := hashDisc(newFakeDisc(nil), titleSets); err == nil {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "VIDEO_TS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := dvdread.Open(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Skipf("a disc with an empty VIDEO_TS does not open: %v", err)
+	}
+	defer r.Close() //nolint:errcheck // the test is over either way
+	if _, err := hashDisc(r); err == nil {
 		t.Error("hashing a disc with no files should fail")
 	}
 }
@@ -207,11 +149,7 @@ func TestHashDiscOnDisc(t *testing.T) {
 					t.Errorf("closing the navigator: %v", err)
 				}
 			}()
-			titleSets, err := nav.NumberOfTitleSets()
-			if err != nil {
-				t.Fatal(nav.ErrToString())
-			}
-			got, err := hashDisc(nav.Reader(), int(titleSets))
+			got, err := hashDisc(nav.Reader())
 			if err != nil {
 				t.Fatal(err)
 			}

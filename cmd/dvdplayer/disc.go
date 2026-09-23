@@ -156,6 +156,14 @@ func openDisc(path string, logger *slog.Logger, useCSS, readahead bool) (*disc, 
 	if err := nav.SetReadAheadFlag(ra); err != nil {
 		return nil, errors.Join(err, nav.Close())
 	}
+	// Positioning defaults to PG based, which scopes a time or sector
+	// search to the current chapter alone. GetCurrentTime counts from
+	// the start of the whole program chain regardless, so a seek given
+	// that time back would come up short of the chapter it lands in and
+	// fail; PGC based positioning is what makes the two agree.
+	if err := nav.SetPGCPositioningFlag(1); err != nil {
+		return nil, errors.Join(err, nav.Close())
+	}
 
 	d := &disc{
 		nav:   nav,

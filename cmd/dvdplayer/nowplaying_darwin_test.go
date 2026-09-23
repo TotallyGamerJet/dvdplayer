@@ -6,6 +6,10 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"log/slog"
 	"testing"
 	"time"
@@ -171,5 +175,93 @@ func TestNowPlayingCommandsDoNotBlock(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the handler blocked on a command nothing was reading")
+	}
+}
+
+// jpegBytes is a picture macOS will read, drawn here so the test needs
+// nothing off the network.
+func jpegBytes(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 96))
+	for y := range 96 {
+		for x := range 64 {
+			img.Set(x, y, color.RGBA{R: uint8(x * 4), G: uint8(y * 2), B: 0x80, A: 0xff})
+		}
+	}
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// TestNowPlayingArtwork checks the cover gets as far as the info centre:
+// that macOS reads the JPEG, that the artwork it is wrapped in answers
+// for the size the system asks for, and that it rides along on every
+// update after.
+func TestNowPlayingArtwork(t *testing.T) {
+	m, err := loadMediaPlayer()
+	if err != nil {
+		t.Skip(err)
+	}
+	np := newNowPlaying(make(chan nowPlayingCommand, 1), slog.New(slog.DiscardHandler))
+	mac, ok := np.(*macNowPlaying)
+	if !ok {
+		t.Fatalf("newNowPlaying gave %T, want the macOS one", np)
+	}
+	t.Cleanup(mac.close)
+
+	mac.artwork(jpegBytes(t))
+	if mac.art == 0 {
+		t.Fatal("no artwork was made from a picture macOS can read")
+	}
+
+	// The system asks the artwork for a size; it should answer with a
+	// picture whatever it asks for.
+	got := mac.art.Send(objc.RegisterName("imageWithSize:"), cgSize{32, 48})
+	if got == 0 {
+		t.Error("the artwork gave no picture for the size asked of it")
+	}
+
+	// And it is on the dictionary the info centre is handed.
+	mac.update(nowPlayingState{title: "Safe", playing: true})
+	info := mac.center.Send(objc.RegisterName("nowPlayingInfo"))
+	if info == 0 {
+		t.Fatal("the info centre reports nothing")
+	}
+	if info.Send(objc.RegisterName("objectForKey:"), m.artwork) == 0 {
+		t.Error("the cover is not on the info the system was given")
+	}
+}
+
+// TestNowPlayingArtworkAbsent checks that a disc with no cover, or one
+// whose cover will not load, leaves the display alone rather than
+// breaking the update that carries everything else.
+func TestNowPlayingArtworkAbsent(t *testing.T) {
+	m, err := loadMediaPlayer()
+	if err != nil {
+		t.Skip(err)
+	}
+	np := newNowPlaying(make(chan nowPlayingCommand, 1), slog.New(slog.DiscardHandler))
+	mac, ok := np.(*macNowPlaying)
+	if !ok {
+		t.Fatalf("newNowPlaying gave %T, want the macOS one", np)
+	}
+	t.Cleanup(mac.close)
+
+	for _, jpeg := range [][]byte{nil, {}, []byte("this is not a picture")} {
+		mac.artwork(jpeg)
+		if mac.art != 0 {
+			t.Errorf("artwork(%q) made something out of nothing", jpeg)
+		}
+	}
+	// The rest of the state still gets through.
+	mac.update(nowPlayingState{title: "Safe", playing: true})
+	info := mac.center.Send(objc.RegisterName("nowPlayingInfo"))
+	if info == 0 {
+		t.Fatal("the info centre reports nothing")
+	}
+	if goString(info.Send(objc.RegisterName("objectForKey:"), m.title)) != "Safe" {
+		t.Error("the title did not get through without a cover")
 	}
 }

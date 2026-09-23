@@ -29,6 +29,7 @@
 //	backspace     go up one menu
 //	n, p          the next and the previous chapter
 //	a, s          the next soundtrack and the next subtitle track
+//	v             the next camera angle, round to the first after the last
 //	u             show or hide the subtitles, which start hidden
 //	i             show or hide the status line, which starts hidden and
 //	              names the film along with where the disc has got to
