@@ -39,6 +39,10 @@
 // The mouse works in menus too: move it to pick out a button and click
 // to press it.
 //
+// A touchscreen taps rather than clicks: tapping a menu button presses
+// it, and tapping anywhere else pauses and resumes the film the way space
+// does, since a touchscreen has no keyboard to reach for.
+//
 // On macOS the disc also shows up in Control Center's Now Playing panel,
 // named by what TheDiscDb says is on it rather than by its volume label,
 // and the media keys play, pause and step between chapters.

@@ -97,6 +97,10 @@ type game struct {
 	area   image.Rectangle
 	cursor image.Point
 
+	// touches is where each touch now on screen began, so that lifting it
+	// can tell a tap from a drag by how far it travelled.
+	touches map[ebiten.TouchID]image.Point
+
 	paused bool
 	// osd says the status line is showing. It starts hidden: what it
 	// has to say is for someone looking into what the disc is doing,
@@ -396,6 +400,7 @@ func (g *game) input() {
 	}
 
 	g.mouse(menu)
+	g.touch(menu)
 }
 
 // mouse points at a menu's buttons.
@@ -406,23 +411,95 @@ func (g *game) mouse(menu bool) {
 	x, y := ebiten.CursorPosition()
 	moved := image.Pt(x, y) != g.cursor
 	g.cursor = image.Pt(x, y)
-	if !g.cursor.In(g.area) {
-		return
-	}
 	press := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
 	if !press && !moved {
 		// Leave the highlight where the keyboard put it while the mouse
 		// is sitting still.
 		return
 	}
-
-	// The button coordinates are in the coded picture's space, which is
-	// what the picture on screen was scaled from.
-	bx := int32((x - g.area.Min.X) * g.cur.pictureW / g.area.Dx())
-	by := int32((y - g.area.Min.Y) * g.cur.pictureH / g.area.Dy())
+	bx, by, ok := g.toPicture(x, y)
+	if !ok {
+		return
+	}
 	if b := g.d.pointAt(bx, by, press); b > 0 {
 		g.overlay.press(b)
 	}
+}
+
+// toPicture converts a point in screen space to the coded picture's own
+// space, which is what a button's position is given in. ok is false where
+// there is no picture on screen to point at yet, or the point falls
+// outside it.
+func (g *game) toPicture(x, y int) (bx, by int32, ok bool) {
+	if g.cur == nil || g.area.Empty() || !image.Pt(x, y).In(g.area) {
+		return 0, 0, false
+	}
+	bx = int32((x - g.area.Min.X) * g.cur.pictureW / g.area.Dx())
+	by = int32((y - g.area.Min.Y) * g.cur.pictureH / g.area.Dy())
+	return bx, by, true
+}
+
+// touchTapMove is how far a touch may drift from where it began and still
+// count as a tap rather than a drag — a drag is nobody's gesture yet, but
+// this keeps one from being read as a tap once it is.
+const touchTapMove = 24
+
+// touch turns a tap into what a mouse click there would do: press a menu
+// button under it. Elsewhere, where most of the picture has no button to
+// press, it is instead the one touch gesture this player has outside a
+// menu: play toggles the way Space toggles it, so that a screen with no
+// keyboard is not also a screen with no way to pause.
+//
+// It acts on release rather than on touch: a tap is told from the
+// beginning of what may turn into a drag or a long press only once it is
+// over, by how far it travelled and how long it lasted. Both are left
+// alone here for a gesture yet to come.
+func (g *game) touch(menu bool) {
+	for _, id := range inpututil.AppendJustPressedTouchIDs(nil) {
+		if g.touches == nil {
+			g.touches = make(map[ebiten.TouchID]image.Point)
+		}
+		x, y := ebiten.TouchPosition(id)
+		g.touches[id] = image.Pt(x, y)
+	}
+	for _, id := range inpututil.AppendJustReleasedTouchIDs(nil) {
+		start, held := g.touches[id]
+		delete(g.touches, id)
+		if !held {
+			continue
+		}
+		x, y := inpututil.TouchPositionInPreviousTick(id)
+		delta := image.Pt(x, y).Sub(start)
+		if delta.X*delta.X+delta.Y*delta.Y > touchTapMove*touchTapMove {
+			continue // dragged rather than tapped
+		}
+		if inpututil.TouchPressDuration(id) > ebiten.TPS()/2 {
+			continue // held long enough to be something else
+		}
+		g.tap(menu, x, y)
+	}
+}
+
+// tap is what a touch tapping the screen does: press the menu button
+// under it, dismiss a still with no button to press, or — the rest of the
+// time — toggle play.
+func (g *game) tap(menu bool, x, y int) {
+	if menu {
+		if bx, by, ok := g.toPicture(x, y); ok {
+			if b := g.d.pointAt(bx, by, true); b > 0 {
+				g.overlay.press(b)
+			}
+		}
+		// A tap that missed every button does nothing further: unlike
+		// ordinary playback, toggling play here would be a surprise in
+		// the middle of browsing a menu.
+		return
+	}
+	if g.d.status().still {
+		g.overlay.press(g.d.activate())
+		return
+	}
+	g.pause(!g.paused)
 }
 
 func (g *game) pause(on bool) {
