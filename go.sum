@@ -1,5 +1,7 @@
 codeberg.org/totallygamerjet/media v0.10.1-0.20260923130050-a8cac5d84322 h1:+13v5SpDjQMMxhMdovTScd10JCb/uekcEbrZ4sbQVcA=
 codeberg.org/totallygamerjet/media v0.10.1-0.20260923130050-a8cac5d84322/go.mod h1:/r3hBRAUNS3/9QKSbujk0Ice5d3tQGUJql/lGdTHuNc=
+codeberg.org/totallygamerjet/media v0.10.1-0.20261007220453-02e1e3c5e4a3 h1:0/tJH5hW7gegCtRcUTHQ1dJhGhihE71fZRaBFDadCTI=
+codeberg.org/totallygamerjet/media v0.10.1-0.20261007220453-02e1e3c5e4a3/go.mod h1:/r3hBRAUNS3/9QKSbujk0Ice5d3tQGUJql/lGdTHuNc=
 github.com/ebitengine/gomobile v0.0.0-20260820040257-d11f821a26a6 h1:Tnc3YtzxhgsvNdNrER9wWkGJbyjOwyUuzjUY5rZK72k=
 github.com/ebitengine/gomobile v0.0.0-20260820040257-d11f821a26a6/go.mod h1:gwnFEwdzWZpNehgwkeK4756Ez58f58bXz6bgEAq+xqk=
 github.com/ebitengine/hideconsole v1.0.0 h1:5J4U0kXF+pv/DhiXt5/lTz0eO5ogJ1iXb8Yj1yReDqE=

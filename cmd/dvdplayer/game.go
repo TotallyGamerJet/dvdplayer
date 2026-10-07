@@ -59,6 +59,10 @@ type game struct {
 	cur   *frame
 	fresh bool
 
+	// late says cur went up behind its time: the video is catching up
+	// rather than keeping time.
+	late bool
+
 	// ycbcr holds the current picture as the shader wants it and rgb the
 	// result of running the shader over it.
 	ycbcr  *ebiten.Image
@@ -173,9 +177,10 @@ func (g *game) Update() error {
 				g.p.recycle(g.cur)
 			}
 			g.cur, g.fresh = f, true
+			g.late = f.pts != mpg.NoPTS && now-f.pts > lateFrame
 		}
 		if g.cur != nil {
-			g.overlay.update(now, g.cur.gen)
+			g.overlay.update(g.overlayTime(now), g.cur.gen)
 		}
 	}
 
@@ -202,6 +207,29 @@ func (g *game) time() (float64, bool) {
 		return head, true
 	}
 	return now, ok
+}
+
+// lateFrame is how far behind its time a picture can go up and still be
+// on time: a few ticks of the game loop.
+const lateFrame = 0.1 // seconds
+
+// overlayTime is the time the overlay is drawn for, which is the clock's
+// unless the video has fallen behind it.
+//
+// The overlay is timed by the clock, as the pictures are, and so the two
+// arrive together — while the video keeps time. Where it is late, say
+// because the decoder is working through pictures that have fallen due
+// all at once, the clock reaches a menu's buttons before the decoder
+// reaches the menu, and the buttons go up over whatever was on screen
+// before it. So while a late picture is up and the next is still being
+// decoded, the overlay keeps to the picture's time instead. A picture
+// that is late and has nothing behind it is a still, and the clock is
+// all there is to go on.
+func (g *game) overlayTime(now float64) float64 {
+	if g.late && g.p.catchingUp() {
+		return min(now, g.cur.pts)
+	}
+	return now
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
@@ -336,6 +364,7 @@ func (g *game) input() {
 			continue
 		}
 		if menu {
+			g.resume()
 			g.d.selectButton(k.dir)
 			continue
 		}
@@ -348,10 +377,14 @@ func (g *game) input() {
 	}
 
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter) {
+		if menu || g.d.status().still {
+			g.resume()
+		}
 		g.overlay.press(g.d.activate())
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
 		if menu || g.d.status().still {
+			g.resume()
 			g.overlay.press(g.d.activate())
 		} else {
 			g.pause(!g.paused)
@@ -370,18 +403,16 @@ func (g *game) input() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
 		if err := g.d.goUp(); err != nil {
 			g.notef("cannot go up: %v", g.d.nav.ErrToString())
+		} else {
+			g.resume()
 		}
 	}
 
 	if inpututil.IsKeyJustPressed(ebiten.KeyN) || inpututil.IsKeyJustPressed(ebiten.KeyPageDown) {
-		if err := g.d.nextPart(); err != nil {
-			g.notef("no next chapter")
-		}
+		g.chapter(true)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) || inpututil.IsKeyJustPressed(ebiten.KeyPageUp) {
-		if err := g.d.prevPart(); err != nil {
-			g.notef("no previous chapter")
-		}
+		g.chapter(false)
 	}
 
 	if inpututil.IsKeyJustPressed(ebiten.KeyA) {
@@ -408,10 +439,24 @@ func (g *game) mouse(menu bool) {
 	if !menu || g.cur == nil || g.area.Empty() {
 		return
 	}
+	if !ebiten.IsFocused() {
+		return
+	}
+
 	x, y := ebiten.CursorPosition()
 	moved := image.Pt(x, y) != g.cursor
 	g.cursor = image.Pt(x, y)
 	press := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
+	if g.paused && !press {
+		// A paused menu shows nothing new, the highlight included, so
+		// the pointer is left until a click starts it again. Selecting
+		// would do worse than nothing on a button that acts as soon as
+		// it is selected: its jump would wait unseen behind the pause.
+		return
+	}
+	if press {
+		g.resume()
+	}
 	if !press && !moved {
 		// Leave the highlight where the keyboard put it while the mouse
 		// is sitting still.
@@ -484,6 +529,13 @@ func (g *game) touch(menu bool) {
 // under it, dismiss a still with no button to press, or — the rest of the
 // time — toggle play.
 func (g *game) tap(menu bool, x, y int) {
+	// A paused picture plays again whatever is under the tap: a menu can
+	// be left paused too, by the page going out of view with it up, and
+	// a tap is all a touch screen has to start it again.
+	if g.paused {
+		g.pause(false)
+		return
+	}
 	if menu {
 		if bx, by, ok := g.toPicture(x, y); ok {
 			if b := g.d.pointAt(bx, by, true); b > 0 {
@@ -513,18 +565,53 @@ func (g *game) pause(on bool) {
 	}
 }
 
+// resume starts a paused disc again, which is what anything that sends
+// the disc somewhere else has to do.
+//
+// A pause stops the picture where it is: nothing more is taken from the
+// decoder and the sound stops asking for any. The navigator makes the
+// jump regardless, so a disc left paused across one has moved while the
+// screen has not, and it stays that way — the menu that was asked for
+// never appears, a chapter skipped to is not the one on screen — until
+// the viewer works out that it is play they have to press. A set-top
+// player does the same: skip or call the menu from pause and it plays.
+//
+// What only changes how the disc is shown or heard — the soundtrack, the
+// subtitles, the angle, the status line — leaves a pause alone.
+func (g *game) resume() {
+	if g.paused {
+		g.pause(false)
+	}
+}
+
 func (g *game) seek(delta time.Duration) {
 	if err := g.d.seek(delta); err != nil {
 		g.notef("cannot seek: %s", g.d.nav.ErrToString())
 		return
 	}
+	g.resume()
 	g.notef("%+ds", int(delta.Seconds()))
 }
 
 func (g *game) call(id dvdnav.MenuID) {
 	if err := g.d.menuCall(id); err != nil {
 		g.notef("no %s menu", id)
+		return
 	}
+	g.resume()
+}
+
+// chapter skips to the next chapter, or back to the last.
+func (g *game) chapter(next bool) {
+	skip, none := g.d.prevPart, "no previous chapter"
+	if next {
+		skip, none = g.d.nextPart, "no next chapter"
+	}
+	if err := skip(); err != nil {
+		g.notef("%s", none)
+		return
+	}
+	g.resume()
 }
 
 // cycleStream moves to the next soundtrack or subtitle the disc offers.

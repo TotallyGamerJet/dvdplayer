@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"runtime"
 
 	"codeberg.org/totallygamerjet/media/dvdcss"
 	"codeberg.org/totallygamerjet/media/dvdnav"
@@ -68,8 +70,45 @@ func openNav(path string, logger *slog.Logger, useCSS bool) (*dvdnav.DVDNav, err
 			if logger == nil {
 				logger = slog.New(slog.DiscardHandler)
 			}
-			return dvdcss.Open(path, logger)
+			return openCSS(path, logger)
 		}
 	}
 	return dvdnav.OpenCSS(path, logger, opener)
+}
+
+// openCSS opens what libdvdread asks to descramble — the drive itself, an
+// image, or one VOB of a VIDEO_TS tree — and hands it to dvdcss, which
+// talks to the drive where the file is one and cracks the keys where not.
+//
+// On Windows it asks for write access first, which is what lets dvdcss fall
+// back to SCSI pass-through for a drive whose driver does not take the DVD
+// commands. Where that is refused, and on every other system, reading is
+// all dvdcss needs.
+func openCSS(path string, logger *slog.Logger) (dvdread.CSS, error) {
+	var f *os.File
+	err := errors.ErrUnsupported
+	if runtime.GOOS == "windows" {
+		f, err = os.OpenFile(path, os.O_RDWR, 0)
+	}
+	if err != nil {
+		if f, err = os.Open(path); err != nil {
+			return nil, err
+		}
+	}
+	d, err := dvdcss.OpenReader(f, logger)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return &fileCSS{d, f}, nil
+}
+
+// fileCSS is a descrambler over a file it opened, and closes with it.
+type fileCSS struct {
+	*dvdcss.DVD
+	f *os.File
+}
+
+func (c *fileCSS) Close() error {
+	// The drive is let go of before the file it was reached through.
+	return errors.Join(c.DVD.Close(), c.f.Close())
 }

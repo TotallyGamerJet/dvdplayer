@@ -47,9 +47,10 @@ const (
 )
 
 // nowPlaying is the operating system's own display of what is playing.
-// Only macOS has one here; everywhere else newNowPlaying returns
-// nopNowPlaying, whose methods do nothing, so the player has no platform
-// tests around what it reports.
+// Only macOS has one here; the browser's newNowPlaying only listens for
+// the page being hidden, and everywhere else it returns nopNowPlaying,
+// whose methods do nothing, so the player has no platform tests around
+// what it reports.
 type nowPlaying interface {
 	// update tells the system what is playing now. It is called only
 	// when that has changed.
@@ -232,12 +233,8 @@ func (g *game) doNowPlayingCommand(cmd nowPlayingCommand) {
 	case npToggle:
 		g.pause(!g.paused)
 	case npNext:
-		if err := g.d.nextPart(); err != nil {
-			g.notef("no next chapter")
-		}
+		g.chapter(true)
 	case npPrev:
-		if err := g.d.prevPart(); err != nil {
-			g.notef("no previous chapter")
-		}
+		g.chapter(false)
 	}
 }

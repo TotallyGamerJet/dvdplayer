@@ -41,6 +41,12 @@ type disc struct {
 	head, tail, count int
 	off               int // how much of the block at head has been read
 
+	// seams marks the blocks the disc's time stamps start again at, and
+	// shifts says by how much what follows has to be moved to carry on
+	// from where the time stamps before it ended. See [seam].
+	seams  [queueBlocks]bool
+	shifts [queueBlocks]float64
+
 	// err is what the navigator stopped with, reported once the queue
 	// has drained. closed is set by Close and unblocks both ends.
 	err    error
@@ -59,6 +65,17 @@ type disc struct {
 	// the jump can be thrown away rather than played over the top of
 	// what the viewer asked for.
 	jumped bool
+
+	// end is where the presentation time of the last VOBU the navigator
+	// read ran to, and vob and cell the VOB and cell it belongs to, so
+	// that the next VOBU can be checked for following on from it.
+	// haveEnd says there is one to check against: after a jump or a
+	// still there is not, as what follows those places itself afresh.
+	// They belong to the navigator's goroutine.
+	end     uint32
+	vob     uint16
+	cell    uint8
+	haveEnd bool
 
 	// still records the still frame the navigator is holding on, if any.
 	// The navigator's goroutine waits there until release says how the
@@ -209,10 +226,37 @@ func (d *disc) Close() error {
 // reader still holds from before it is of no further use.
 var errDiscontinuity = errors.New("dvdplay: the disc jumped")
 
+// A seam is what [disc.Read] reports where the disc's time stamps start
+// again without the disc having jumped.
+//
+// A disc is free to start its time stamps again at every VOB, and
+// plenty do: one title after another each counting up from a fraction
+// of a second, a menu that loops back to its own start every minute.
+// The navigator walks from one to the next on its own — the disc's own
+// commands take it there, and nothing the viewer did — so it reports no
+// jump, and nothing that is queued is to be thrown away: it all still
+// has to be seen and heard, in order. But the stream's time then goes
+// backwards, or leaps, part way through what the player holds, and
+// everything that schedules by it — the clock, the pictures waiting
+// for it, the menu overlays, how far ahead the sound is allowed to run
+// — is comparing times from two different time lines.
+//
+// So the time stamps after a seam are moved to carry on from where the
+// ones before it ended, which is what shift is: seconds to add to
+// every time stamp from here on, on top of any earlier seam's.
+//
+// A seam always falls at a block boundary, ahead of the NAV pack that
+// starts the VOBU, and a DVD pack is exactly one block, so the demuxer
+// meets it between packets having lost nothing.
+type seam struct{ shift float64 }
+
+func (s *seam) Error() string { return "dvdplay: the disc's time stamps start again" }
+
 // Read hands the demuxer the next of the program stream. It blocks while
 // the navigator has nothing to give — during a still frame, say — and
-// reports io.EOF once the disc has been played to its end, or
-// errDiscontinuity where the disc has jumped.
+// reports io.EOF once the disc has been played to its end,
+// errDiscontinuity where the disc has jumped, or a *seam where its time
+// stamps start again.
 func (d *disc) Read(p []byte) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -235,6 +279,11 @@ func (d *disc) Read(p []byte) (int, error) {
 		break
 	}
 
+	if d.off == 0 && d.seams[d.head] {
+		// Reported before the block, and only once.
+		d.seams[d.head] = false
+		return 0, &seam{d.shifts[d.head]}
+	}
 	n := copy(p, d.ring[d.head][d.off:d.lens[d.head]])
 	d.off += n
 	if d.off == d.lens[d.head] {
@@ -264,11 +313,13 @@ func (d *disc) run() {
 			// The NAV packet is part of the stream too, so it goes to
 			// the demuxer along with everything else; it is a private
 			// stream the demuxer skips over.
+			shift, seamed := 0.0, false
 			if block.Event == dvdnav.EventNavPacket {
 				d.setPCI()
 				d.setTime()
+				shift, seamed = d.timeline()
 			}
-			if !d.push(block.Data[:block.Len]) {
+			if !d.push(block.Data[:block.Len], shift, seamed) {
 				return
 			}
 
@@ -278,6 +329,11 @@ func (d *disc) run() {
 			if !d.holdStill(still.Length) {
 				return
 			}
+			// The clock ran on while the still was held, so the time
+			// stamps that follow are not to be lined up with the ones
+			// before it: they place themselves afresh, as they did
+			// before seams were looked for.
+			d.haveEnd = false
 
 		case dvdnav.EventWait:
 			// The player buffers little and the queue drains on its
@@ -297,6 +353,7 @@ func (d *disc) run() {
 				return
 			}
 			d.log.Debug("the disc jumped: dropping what was buffered")
+			d.haveEnd = false
 			d.mu.Lock()
 			d.jumped = true
 			d.cond.Broadcast()
@@ -381,9 +438,45 @@ func (d *disc) run() {
 	}
 }
 
-// push queues one block for the demuxer, waiting for room. It reports
-// whether the disc is still open.
-func (d *disc) push(block []byte) bool {
+// timeline checks that the VOBU the navigator has just reached carries
+// on the time line of the one before it, and where it does not reports
+// the shift that makes it, as a [seam].
+//
+// Every VOBU's NAV packet gives the presentation time the VOBU starts
+// and ends at, and within a stretch of continuous time stamps each one
+// starts exactly where the last one ended. A VOBU that starts anywhere
+// else has had its time stamps start again — a new VOB, or a cell
+// played again from its beginning — unless it is later on in the very
+// same cell, which is the disc skipping ahead on one time line rather
+// than starting another.
+//
+// It must be called from the navigator's goroutine.
+func (d *disc) timeline() (shift float64, seamed bool) {
+	pci, dsi := d.nav.GetCurrentNavPCI(), d.nav.GetCurrentNavDSI()
+	return d.follow(pci.PciGI.VobuSPTM, pci.PciGI.VobuEPTM, dsi.DsiGI.VobuVOBIdn, dsi.DsiGI.VobuCIdn)
+}
+
+// follow is [disc.timeline] given the VOBU's presentation times, in PTS
+// ticks, and the VOB and cell it belongs to.
+func (d *disc) follow(start, end uint32, vob uint16, cell uint8) (shift float64, seamed bool) {
+	if end <= start {
+		// No span of time to go on.
+		return 0, false
+	}
+	sameCell := vob == d.vob && cell == d.cell
+	if d.haveEnd && start != d.end && (!sameCell || start < d.end) {
+		shift, seamed = (float64(d.end)-float64(start))/90000, true
+		d.log.Debug("the disc's time stamps start again",
+			"from", float64(d.end)/90000, "to", float64(start)/90000)
+	}
+	d.end, d.vob, d.cell, d.haveEnd = end, vob, cell, true
+	return shift, seamed
+}
+
+// push queues one block for the demuxer, waiting for room, with the
+// [seam] that falls ahead of it if there is one. It reports whether the
+// disc is still open.
+func (d *disc) push(block []byte, shift float64, seamed bool) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -393,6 +486,7 @@ func (d *disc) push(block []byte) bool {
 		}
 		d.cond.Wait()
 	}
+	d.seams[d.tail], d.shifts[d.tail] = seamed, shift
 	d.lens[d.tail] = copy(d.ring[d.tail][:], block)
 	d.tail = (d.tail + 1) % queueBlocks
 	d.count++
@@ -420,13 +514,24 @@ func (d *disc) drain() bool {
 // until the viewer moves on when length is 0xff. It reports whether the
 // disc is still open.
 func (d *disc) holdStill(length int) bool {
+	// The still is held from the moment the navigator reaches it, not
+	// from when the queue has drained. The menu the still belongs to is
+	// already the one the viewer is pointing at, and a button pressed
+	// while its picture is still on its way — which is when a viewer
+	// who clicked once and saw nothing happen clicks again — runs its
+	// command straight away. Were the still not held yet, endStill
+	// would find nothing to release, and the navigator would then sit
+	// on this still for good with the jump the button made never taken.
+	d.mu.Lock()
+	d.release = stillHolding
+	d.mu.Unlock()
 	if !d.drain() {
 		return false
 	}
 
 	d.mu.Lock()
-	d.still, d.stillLen, d.release = true, length, stillHolding
-	if length != 0xff {
+	d.still, d.stillLen = true, length
+	if length != 0xff && d.release == stillHolding {
 		// Time the still from the moment the queue ran dry, which is
 		// about when its frame reaches the screen.
 		t := time.AfterFunc(time.Duration(length)*time.Second, func() {
@@ -730,7 +835,32 @@ func (d *disc) selectButton(dir direction) {
 	if err != nil {
 		d.log.Debug("moving the highlight", "direction", dir, "error", err)
 	}
+	// Moving onto a button that acts as soon as it is selected has run
+	// its command already, inside the navigator, and that command is
+	// nearly always a jump. See [disc.autoAction].
+	if err == nil && d.autoAction(s.pci) {
+		d.endStill(true)
+	}
 	d.syncButton()
+}
+
+// autoAction reports whether the button now highlighted is one the disc
+// has act as soon as it is selected, rather than when it is pressed.
+//
+// Some menus are built from these. A menu whose highlight is part of its
+// artwork, rather than drawn over it, is a still for each option lit up,
+// and the option's place on each of the others is a button with no
+// colours of its own that acts on being selected: selecting it runs a
+// jump to the still with that option lit, and on that still the same
+// place is an ordinary button. Selecting one and not acting on it — or
+// acting on it and leaving the navigator holding the still it jumped
+// away from — leaves the viewer pointing at nothing they can see.
+func (d *disc) autoAction(pci *dvdread.PCI) bool {
+	button, err := d.nav.GetCurrentHighlight()
+	if err != nil || button < 1 || int(button) > int(pci.HLI.HlGI.BtnNs) {
+		return false
+	}
+	return pci.HLI.Btnit[button-1].AutoActionMode != 0
 }
 
 // activate presses the highlighted button, or moves past the still when
@@ -758,8 +888,17 @@ func (d *disc) pointAt(x, y int32, press bool) int32 {
 		return 0
 	}
 	if !press {
-		if err := d.nav.MouseSelect(s.pci, x, y); err != nil {
+		err := d.nav.MouseSelect(s.pci, x, y)
+		if err != nil {
 			d.log.Debug("moving the highlight to the pointer", "x", x, "y", y, "error", err)
+		}
+		// The keys act on a button that acts on being selected from
+		// inside the navigator; pointing at one does not, so it is done
+		// here. See [disc.autoAction].
+		if err == nil && d.autoAction(s.pci) {
+			if err := d.nav.ButtonActivate(s.pci); err == nil {
+				d.endStill(true)
+			}
 		}
 		d.syncButton()
 		return 0

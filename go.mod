@@ -3,7 +3,7 @@ module dvdplayer.app/dvdplayer
 go 1.27.0
 
 require (
-	codeberg.org/totallygamerjet/media v0.10.1-0.20260923130050-a8cac5d84322
+	codeberg.org/totallygamerjet/media v0.10.1-0.20261007220453-02e1e3c5e4a3
 	github.com/ebitengine/purego v0.11.1
 	github.com/gen2brain/mpeg v0.6.2
 	github.com/hajimehoshi/ebiten/v2 v2.10.3

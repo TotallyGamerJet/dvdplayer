@@ -36,6 +36,11 @@
 //	f             fill the screen
 //	q             quit
 //
+// Anything that sends a paused disc somewhere else starts it playing
+// again — seeking, skipping a chapter, calling a menu up, going up one,
+// or working the buttons of a menu — as a set-top player does. Changing
+// the soundtrack, the subtitles or the angle leaves it paused.
+//
 // The mouse works in menus too: move it to pick out a button and click
 // to press it.
 //

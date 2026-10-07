@@ -53,7 +53,7 @@ import (
 const (
 	maxAudioLead    = 0.5 // seconds of stream time
 	maxVideoPackets = 768
-	maxAudioChunks  = 48
+	maxAudioChunks  = 192
 	maxSubpictures  = 8
 	maxFrames       = 4
 )
@@ -157,6 +157,10 @@ type player struct {
 	nextTime    float64
 	framePeriod float64
 
+	// idle says the video decoder is waiting on the demuxer, having
+	// decoded everything it was given.
+	idle bool
+
 	// stopped is set once the disc has been played out, and closing
 	// releases the goroutines.
 	stopped bool
@@ -196,14 +200,26 @@ func (p *player) close() {
 // route is the demuxer's goroutine: it splits the program stream and
 // hands each packet to the queue it belongs in.
 func (p *player) route() {
+	// shift is what the seams passed since the last jump add to every
+	// time stamp, which keeps the stream's time running on through them.
+	shift := 0.0
 	for {
 		pkt, err := p.demux.Next()
 		if errors.Is(err, errDiscontinuity) {
 			// The disc has left for somewhere else. Everything held
 			// belongs to where it was, including whatever the demuxer
-			// has read but not yet made a packet of.
+			// has read but not yet made a packet of. What follows
+			// places itself afresh, so the seams are forgotten too.
 			p.discard()
 			p.demux = mpg.NewDemux(p.d)
+			shift = 0
+			continue
+		}
+		var s *seam
+		if errors.As(err, &s) {
+			// The time stamps start again, but nothing is lost: the
+			// demuxer is between packets and carries on as it was.
+			shift += s.shift
 			continue
 		}
 		if err != nil {
@@ -213,6 +229,9 @@ func (p *player) route() {
 			p.cond.Broadcast()
 			p.mu.Unlock()
 			return
+		}
+		if pkt.PTS != mpg.NoPTS {
+			pkt.PTS += shift
 		}
 
 		p.mu.Lock()
@@ -224,7 +243,7 @@ func (p *player) route() {
 			p.videoQ = append(p.videoQ, pkt)
 		case pkt.IsSubpicture():
 			p.routeSubpicture(pkt)
-		case pkt.IsAC3() || pkt.IsMPEGAudio():
+		case decodableAudio(pkt):
 			p.routeAudio(pkt)
 		}
 		p.cond.Broadcast()
@@ -234,6 +253,13 @@ func (p *player) route() {
 			return
 		}
 	}
+}
+
+// decodableAudio reports whether the packet is part of a soundtrack the
+// player decodes: AC3, DTS, linear PCM or MPEG audio. SDDS and the rest
+// are not queued, as nothing would play them.
+func decodableAudio(pkt mpg.Packet) bool {
+	return pkt.IsAC3() || pkt.IsDTS() || pkt.IsLPCM() || pkt.IsMPEGAudio()
 }
 
 // routeAudio queues a packet of the stream the disc has selected and
@@ -263,21 +289,35 @@ func (p *player) routeAudio(pkt mpg.Packet) {
 // is how far ahead of what is being heard the demuxer has run. It reports
 // zero for a stream that carries no time stamps to measure with. p.mu
 // must be held.
+//
+// The span is measured a stretch at a time, a stretch ending wherever the
+// time stamps go backwards or leap ahead, and the stretches added up. The
+// sound is played one piece after the next whatever its time stamps say,
+// so a break in them is no break in what has to be heard. Measuring from
+// the first time stamp to the last instead would take the break for the
+// span, and where the time stamps start again — a seam the disc gave no
+// warning of — the last is before the first: the lead reads as nothing,
+// and the demuxer runs on until the hard cap stops it, many seconds of
+// sound ahead of the picture.
 func (p *player) audioLead() float64 {
-	first, last := mpg.NoPTS, mpg.NoPTS
+	const leap = 1.0 // seconds; far more than ever lies between packets
+	lead, first, last := 0.0, mpg.NoPTS, mpg.NoPTS
 	for _, c := range p.audioQ {
 		if c.pts == mpg.NoPTS {
 			continue
 		}
-		if first == mpg.NoPTS {
+		if first == mpg.NoPTS || c.pts < last || c.pts-last > leap {
+			if first != mpg.NoPTS {
+				lead += last - first
+			}
 			first = c.pts
 		}
 		last = c.pts
 	}
-	if first == mpg.NoPTS || last <= first {
-		return 0
+	if first != mpg.NoPTS {
+		lead += last - first
 	}
-	return last - first
+	return lead
 }
 
 // routeSubpicture reassembles subpicture units, which are generally
@@ -362,8 +402,10 @@ func (p *player) feedVideo() bool {
 			p.mu.Unlock()
 			return false
 		}
+		p.idle = true
 		p.cond.Wait()
 	}
+	p.idle = false
 	pkt := p.videoQ[0]
 	p.videoQ = p.videoQ[1:]
 	p.cond.Broadcast()
@@ -598,6 +640,14 @@ func (p *player) peekFrame() (float64, bool) {
 		return 0, false
 	}
 	return p.frames[0].pts, true
+}
+
+// catchingUp reports whether the next picture is still being decoded:
+// none is ready, and the decoder has work in hand.
+func (p *player) catchingUp() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.frames) == 0 && (!p.idle || len(p.videoQ) > 0)
 }
 
 // recycle returns a shown picture's buffer for reuse.

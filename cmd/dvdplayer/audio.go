@@ -12,6 +12,7 @@ import (
 	"github.com/gen2brain/mpeg"
 
 	"codeberg.org/totallygamerjet/media/ac3"
+	"codeberg.org/totallygamerjet/media/dca"
 	"codeberg.org/totallygamerjet/media/mpg"
 )
 
@@ -199,8 +200,10 @@ type audioTrack struct {
 	stream  streamID
 	haveDec bool
 
-	ac3 *ac3.State
-	mp2 *mpeg.Audio
+	ac3  *ac3.State
+	dca  *dca.State
+	mp2  *mpeg.Audio
+	lpcm lpcmState
 
 	// in holds the compressed bytes of the current stream that no frame
 	// has been decoded from yet.
@@ -251,6 +254,7 @@ func (t *audioTrack) Read(buf []byte) (int, error) {
 		t.flush = g
 		t.in, t.out = t.in[:0], nil
 		t.nextPTS = mpg.NoPTS
+		t.resetDecoders()
 	}
 
 	for len(t.out) < len(buf) {
@@ -286,24 +290,27 @@ func (t *audioTrack) decodeSome() bool {
 		t.reset(chunk.stream)
 	}
 	if chunk.pts != mpg.NoPTS && t.note(chunk.pts) {
-		// The sound does not follow on from what came before, so the
-		// disc has jumped. What is left in the buffer is the tail of a
-		// frame from where we were, and splicing it onto what comes
-		// next would make a frame that never existed: a sync word with
-		// a length that describes neither piece.
+		// The sound does not follow on from what came before: the disc
+		// has jumped, or left a gap. What is left in the buffer is the
+		// tail of a frame from before the break, and splicing it onto
+		// what comes next would make a frame that never existed: a sync
+		// word with a length that describes neither piece.
 		t.in = t.in[:0]
+		t.resetDecoders()
 	}
 	t.in = append(t.in, chunk.data...)
 
 	switch {
 	case chunk.stream.substream >= mpg.SubstreamAC3Min && chunk.stream.substream <= mpg.SubstreamAC3Max:
 		t.decodeAC3()
+	case chunk.stream.substream >= mpg.SubstreamDTSMin && chunk.stream.substream <= mpg.SubstreamDTSMax:
+		t.decodeDTS()
 	case chunk.stream.substream >= mpg.SubstreamLPCMMin && chunk.stream.substream <= mpg.SubstreamLPCMMax:
 		t.decodeLPCM()
 	case chunk.stream.id >= mpg.StreamAudioMin && chunk.stream.id <= mpg.StreamAudioMax:
 		t.decodeMP2()
 	default:
-		// A soundtrack this player cannot decode, DTS say. Drop it: the
+		// A soundtrack this player cannot decode, SDDS say. Drop it: the
 		// silence Read hands out stands in for it.
 		t.in = t.in[:0]
 	}
@@ -328,13 +335,16 @@ func (t *audioTrack) take() (audioChunk, bool) {
 // what a switch to another soundtrack calls for.
 func (t *audioTrack) reset(s streamID) {
 	t.stream, t.haveDec = s, true
-	t.ac3, t.mp2 = nil, nil
+	t.ac3, t.dca, t.mp2 = nil, nil, nil
+	t.lpcm.Reset()
 	t.in, t.out = t.in[:0], nil
 	t.nextPTS = mpg.NoPTS
 
 	switch {
 	case s.substream >= mpg.SubstreamAC3Min && s.substream <= mpg.SubstreamAC3Max:
 		t.ac3 = ac3.NewState()
+	case s.substream >= mpg.SubstreamDTSMin && s.substream <= mpg.SubstreamDTSMax:
+		t.dca = dca.NewState()
 	case s.id >= mpg.StreamAudioMin && s.id <= mpg.StreamAudioMax:
 		if buf, err := mpeg.NewBuffer(nil); err == nil {
 			t.mp2 = mpeg.NewAudio(buf)
@@ -342,12 +352,33 @@ func (t *audioTrack) reset(s streamID) {
 	}
 }
 
+// maxAudioGap is the longest gap in the sound's time stamps that is
+// played as the silence it is, rather than marked for the clock to jump
+// across. See [audioTrack.note].
+const maxAudioGap = 2.0 // seconds
+
 // note marks the stream time of the sound about to be decoded when it
 // does not simply follow on from what came before, and reports whether
 // it had to.
+//
+// Sound that starts a little after the last ended is a gap the disc
+// meant to be heard as silence — a second of a title with no soundtrack,
+// say, between two that have one — and it is played as silence. Marked
+// instead, the clock would jump the gap the moment the device got there,
+// and every picture in it would fall due at once: the video skips ahead
+// to catch up, and whatever is drawn by the clock rather than with the
+// picture, a menu's buttons, turns up over a picture it does not belong
+// to.
 func (t *audioTrack) note(pts float64) bool {
-	if t.nextPTS != mpg.NoPTS && math.Abs(pts-t.nextPTS) < 0.1 {
-		return false
+	if t.nextPTS != mpg.NoPTS {
+		gap := pts - t.nextPTS
+		if math.Abs(gap) < 0.1 {
+			return false
+		}
+		if gap > 0 && gap <= maxAudioGap {
+			t.emit(make([]byte, int(gap*sampleRate+0.5)*bytesPerFrame))
+			return true
+		}
 	}
 	t.nextPTS = pts
 	// The samples decoded from here play once the device has worked
@@ -437,6 +468,93 @@ func (t *audioTrack) decodeAC3Frame() {
 	}
 }
 
+// decodeDTS decodes every complete DTS frame buffered. A DVD's are 16-bit
+// big-endian, but the decoder reads any packing, and the frames are found
+// by the same header check whichever they are.
+func (t *audioTrack) decodeDTS() {
+	if t.dca == nil {
+		t.in = t.in[:0]
+		return
+	}
+	for {
+		// Find a frame header, with the whole of the frame behind it.
+		i := 0
+		length, rate, blocks := 0, 0, 0
+		for ; i+dca.HeaderSize <= len(t.in); i++ {
+			var frameLength int
+			if length, _, rate, _, frameLength = dca.SyncInfo(t.in[i:]); length != 0 {
+				blocks = frameLength / dca.SamplesPerBlock
+				break
+			}
+		}
+		if length == 0 {
+			// Nothing here yet; keep the end, which may be the start of
+			// the header of a frame the next packet finishes.
+			t.in = append(t.in[:0], t.in[i:]...)
+			return
+		}
+		if i+length > len(t.in) {
+			t.in = append(t.in[:0], t.in[i:]...)
+			return
+		}
+		if rate == sampleRate {
+			t.decodeDTSFrame(t.in[i:i+length], blocks)
+		}
+		t.in = append(t.in[:0], t.in[i+length:]...)
+	}
+}
+
+// decodeDTSFrame decodes a DTS frame of blocks blocks of 256 samples,
+// downmixed to stereo. A frame that cannot be decoded, wholly or in part,
+// plays as silence for what is lost, so that the sound that follows still
+// arrives when the disc says it should.
+func (t *audioTrack) decodeDTSFrame(frame []byte, blocks int) {
+	flags, level := dca.Stereo, float32(1)
+	if t.dca.Frame(frame, &flags, &level, 0) != nil {
+		t.silence(blocks)
+		t.dca.Reset()
+		return
+	}
+
+	if n := dca.SamplesPerBlock * bytesPerFrame; cap(t.samples) < n {
+		t.samples = make([]byte, n)
+	} else {
+		t.samples = t.samples[:n]
+	}
+	for done := range t.dca.BlocksNum() {
+		if t.dca.Block() != nil {
+			t.silence(blocks - done)
+			t.dca.Reset()
+			return
+		}
+		// The decoder hands out one plane per channel, in float already.
+		s := t.dca.Samples()
+		left, right := s[:dca.SamplesPerBlock], s[dca.SamplesPerBlock:2*dca.SamplesPerBlock]
+		if flags&dca.ChannelMask == dca.Mono {
+			right = left
+		}
+		for i := range dca.SamplesPerBlock {
+			binary.LittleEndian.PutUint32(t.samples[bytesPerFrame*i:], math.Float32bits(max(-1, min(1, left[i]))))
+			binary.LittleEndian.PutUint32(t.samples[bytesPerFrame*i+4:], math.Float32bits(max(-1, min(1, right[i]))))
+		}
+		t.emit(t.samples)
+	}
+}
+
+// silence emits blocks blocks of 256 samples of silence.
+func (t *audioTrack) silence(blocks int) {
+	t.emit(make([]byte, blocks*dca.SamplesPerBlock*bytesPerFrame))
+}
+
+// resetDecoders forgets what the decoders carried over from the sound
+// before a jump, which would be heard at the start of what follows.
+func (t *audioTrack) resetDecoders() {
+	if t.dca != nil {
+		t.dca.Reset()
+	}
+	t.lpcm.Reset()
+}
+
 // debias turns one of the AC3 decoder's biased samples into the float32
 // bits the audio device wants. The decoder adds 384 to a 16 bit sample
 // and stores the result as a float, which is how it avoids a conversion
@@ -473,42 +591,4 @@ func (t *audioTrack) decodeMP2() {
 		}
 		t.emit(b)
 	}
-}
-
-// decodeLPCM converts the linear PCM a DVD carries — big endian samples
-// behind a six byte header — into what the device plays.
-func (t *audioTrack) decodeLPCM() {
-	const header = 6
-	if len(t.in) < header {
-		return
-	}
-	// Bits 6 and 7 give the quantisation, 4 and 5 the sample rate and
-	// the low three bits the channel count less one.
-	info := t.in[4]
-	bits := 16 + 4*int(info>>6)
-	rate := sampleRate
-	if info&0x30 != 0 {
-		rate = 96000
-	}
-	n := 1 + int(info&0x07)
-	if bits != 16 || rate != sampleRate || n < 1 || n > 2 {
-		// 20 and 24 bit samples and 96 kHz are rare and not handled.
-		t.in = t.in[:0]
-		return
-	}
-
-	body := t.in[header:]
-	frames := len(body) / (2 * n)
-	b := make([]byte, frames*bytesPerFrame)
-	for i := range frames {
-		l := float32(int16(binary.BigEndian.Uint16(body[2*n*i:]))) / 32768
-		r := l
-		if n == 2 {
-			r = float32(int16(binary.BigEndian.Uint16(body[2*n*i+2:]))) / 32768
-		}
-		binary.LittleEndian.PutUint32(b[bytesPerFrame*i:], math.Float32bits(l))
-		binary.LittleEndian.PutUint32(b[bytesPerFrame*i+4:], math.Float32bits(r))
-	}
-	t.emit(b)
-	t.in = t.in[:0]
 }
