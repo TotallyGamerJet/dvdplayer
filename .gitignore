@@ -3,3 +3,5 @@ docs/*.wasm
 docs/discdb/
 .cache/
 .DS_Store
+docs/index.html
+docs/wasm_exec.js
