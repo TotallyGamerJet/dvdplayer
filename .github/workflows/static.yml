@@ -19,7 +19,7 @@ env:
   # The media commit to build. Update this hash to pick up changes to the
   # dvd branch.
   MEDIA_PKG: codeberg.org/totallygamerjet/media/cmd/dvdplay
-  MEDIA_COMMIT: 2c62e1ed3e33420a85d654b8cb2cce4d9865cb00
+  MEDIA_COMMIT: b6685b75d04251613b94ce4189037c6e08ef08ee
 
 # Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
@@ -45,8 +45,14 @@ jobs:
       - name: Build WASM
         run: |
           env GOOS=js GOARCH=wasm GOEXPERIMENT=simd go install -trimpath -ldflags="-s -w" "$MEDIA_PKG@$MEDIA_COMMIT"
+          # The page and everything it needs beside it: the manifest, the
+          # service worker, the icons. The module cache is read-only, and the
+          # README is for people building it, not for serving.
+          cp -R "$(go env GOMODCACHE)"/codeberg.org/totallygamerjet/media@*/cmd/dvdplay/web/. docs/
+          chmod -R u+w docs
+          rm -f docs/README.md
+          # The program and its loader come from the toolchain that built them.
           cp "$(go env GOPATH)/bin/js_wasm/dvdplay" docs/dvdplay.wasm
-          cp "$(go env GOMODCACHE)"/codeberg.org/totallygamerjet/media@*/cmd/dvdplay/web/index.html docs/index.html
           cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" docs/wasm_exec.js
       - name: Setup Pages
         uses: actions/configure-pages@v5
