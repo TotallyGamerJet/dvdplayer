@@ -19,7 +19,7 @@ env:
   # The media commit to build. Update this hash to pick up changes to the
   # dvd branch.
   MEDIA_PKG: codeberg.org/totallygamerjet/media/cmd/dvdplay
-  MEDIA_COMMIT: 1992407c0abb56ae995f0caa43b91a4dc67ed90b
+  MEDIA_COMMIT: 0bf1d0cd823f7325131a28f65bf8b69141e7171c
 
 # Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
